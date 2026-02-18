@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>德州扑克 - 房间列表</title>
+  <link rel="stylesheet" href="/app.css" />
+</head>
+<body>
+  <main class="container">
+    <header class="header-row">
+      <h1>♠ 房间大厅</h1>
+      <div class="actions">
+        <span id="me" class="hint"></span>
+        <button id="btn-logout-lobby" class="btn-secondary" type="button">退出</button>
+      </div>
+    </header>
+
+    <section class="card">
+      <h2>创建房间</h2>
+      <form id="create-room-form" class="row-form">
+        <input id="room-name" placeholder="房间名称" maxlength="32" />
+        <select id="max-players">
+          <option value="2">2人</option>
+          <option value="3">3人</option>
+          <option value="4" selected>4人</option>
+          <option value="5">5人</option>
+          <option value="6">6人</option>
+        </select>
+        <span>盲注:</span>
+        <input id="open-bet-min" type="number" min="1" value="10" placeholder="开局下注" title="开局最低下注额" style="width:100px" />
+        <span>最小加注:</span>
+        <input id="bet-min" type="number" min="1" value="10" placeholder="加注最低" title="加注最低额" style="width:100px" />
+        <button type="submit">创建</button>
+      </form>
+    </section>
+
+    <section class="card">
+      <h2>房间列表</h2>
+      <div id="rooms"></div>
+    </section>
+  </main>
+  <script src="/js/common.js"></script>
+  <script src="/js/rooms.js"></script>
+</body>
+</html>
