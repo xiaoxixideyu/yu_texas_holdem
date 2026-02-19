@@ -52,7 +52,7 @@ func (h *RoomHandler) CreateRoom(w http.ResponseWriter, r *http.Request, s *stor
 	if req.Name == "" {
 		req.Name = "Room"
 	}
-	if req.MaxPlayers < 2 || req.MaxPlayers > 8 {
+	if req.MaxPlayers < 2 || req.MaxPlayers > 10 {
 		req.MaxPlayers = 4
 	}
 	if req.OpenBetMin <= 0 {

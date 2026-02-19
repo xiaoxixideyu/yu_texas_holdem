@@ -5,5 +5,5 @@ services:
       dockerfile: Dockerfile
     container_name: texas_yu_app
     ports:
-      - "8080:8080"
+      - "15001:8080"
     restart: unless-stopped
