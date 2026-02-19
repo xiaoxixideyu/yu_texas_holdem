@@ -22,10 +22,10 @@ func TestStore_RoomLifecycleAndVersionConflict(t *testing.T) {
 	version := r.StateVersion
 	turnUser := r.Game.Players[r.Game.TurnPos].UserID
 
-	if _, err := s.ApplyAction(room.RoomID, turnUser, "a1", "bet", 10, version-1); err == nil {
+	if _, err := s.ApplyAction(room.RoomID, turnUser, "a1", "call", 0, version-1); err == nil {
 		t.Fatalf("expected version conflict")
 	}
-	if _, err := s.ApplyAction(room.RoomID, turnUser, "a2", "bet", 10, version); err != nil {
+	if _, err := s.ApplyAction(room.RoomID, turnUser, "a2", "call", 0, version); err != nil {
 		t.Fatalf("expected success action, got err=%v", err)
 	}
 }

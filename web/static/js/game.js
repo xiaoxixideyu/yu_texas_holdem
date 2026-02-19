@@ -15,6 +15,8 @@ const ACTION_TEXT = {
   raise: "加注",
   fold: "弃牌",
   leave: "离开房间",
+  small_blind: "小盲",
+  big_blind: "大盲",
 };
 
 const STAGE_TEXT = {
@@ -255,7 +257,7 @@ function renderState(data) {
 
   document.getElementById("players").innerHTML = (g.players || [])
     .map(
-      (p) => {
+      (p, idx) => {
         const isTurn = p.isTurn;
         const isFolded = p.folded;
         let rowClass = "player-row";
@@ -263,6 +265,9 @@ function renderState(data) {
         if (isFolded) rowClass += " is-folded";
 
         const badges = [];
+        if (idx === g.dealerPos) badges.push('<span class="badge badge-dealer">D</span>');
+        if (idx === g.smallBlindPos) badges.push('<span class="badge badge-sb">SB</span>');
+        if (idx === g.bigBlindPos) badges.push('<span class="badge badge-bb">BB</span>');
         if (isTurn) badges.push('<span class="badge badge-turn">行动中</span>');
         if (isFolded) badges.push('<span class="badge badge-folded">已弃牌</span>');
 

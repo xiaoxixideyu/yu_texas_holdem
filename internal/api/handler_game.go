@@ -105,7 +105,7 @@ func (h *GameHandler) GetState(w http.ResponseWriter, r *http.Request, s *store.
 		minRaise := 0
 		if isTurn && !p.Folded {
 			diff := room.Game.RoundBet - p.RoundContrib
-			canCheck = diff == 0 && !(room.Game.Stage == domain.StagePreflop && room.Game.RoundBet == 0)
+			canCheck = diff == 0
 			canCall = diff > 0 && p.Stack >= diff
 			if canCall {
 				callAmount = diff
@@ -153,6 +153,8 @@ func (h *GameHandler) GetState(w http.ResponseWriter, r *http.Request, s *store.
 		"stage":          room.Game.Stage,
 		"pot":            room.Game.Pot,
 		"dealerPos":      room.Game.DealerPos,
+		"smallBlindPos":  room.Game.SmallBlindPos,
+		"bigBlindPos":    room.Game.BigBlindPos,
 		"turnPos":        room.Game.TurnPos,
 		"communityCards": room.Game.CommunityCards,
 		"players":        players,

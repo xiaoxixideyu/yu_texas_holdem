@@ -322,6 +322,9 @@ pre {
 .badge-turn { background: var(--accent); color: #fff; }
 .badge-folded { background: var(--danger); color: #fff; }
 .badge-owner { background: var(--gold); color: #1a1a1a; }
+.badge-dealer { background: #fff; color: #1a1a1a; }
+.badge-sb { background: #5b9bd5; color: #fff; }
+.badge-bb { background: #e67e22; color: #fff; }
 
 .player-details { color: var(--text-muted); font-size: .82rem; }
 .player-cards { display: flex; gap: 3px; flex-shrink: 0; }

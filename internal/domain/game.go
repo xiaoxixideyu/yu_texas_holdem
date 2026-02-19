@@ -40,6 +40,8 @@ type GameResult struct {
 type GameState struct {
 	Stage          GameStage
 	DealerPos      int
+	SmallBlindPos  int
+	BigBlindPos    int
 	TurnPos        int
 	Pot            int
 	CommunityCards []Card
@@ -48,7 +50,7 @@ type GameState struct {
 	Deck       []Card
 	DeckPos    int
 	RoundBet   int
-	OpenBetMin int
+	OpenBetMin int // 大盲金额
 	BetMin     int
 	HasActed   map[string]bool
 	Result     *GameResult
@@ -64,14 +66,34 @@ func NewGame(players []*GamePlayer, dealerPos int, openBetMin int, betMin int) (
 	if betMin <= 0 {
 		return nil, errors.New("bet min must be positive")
 	}
+
+	bigBlind := openBetMin
+	smallBlind := openBetMin / 2
+	if smallBlind < 1 {
+		smallBlind = 1
+	}
+
+	// 计算大小盲位置
+	var sbPos, bbPos int
+	if len(players) == 2 {
+		// Heads-up: 庄家 = 小盲，另一位 = 大盲
+		sbPos = dealerPos
+		bbPos = nextActiveSeat(players, dealerPos)
+	} else {
+		// 3+人: 庄家下一位 = 小盲，再下一位 = 大盲
+		sbPos = nextActiveSeat(players, dealerPos)
+		bbPos = nextActiveSeat(players, sbPos)
+	}
+
 	gs := &GameState{
 		Stage:          StagePreflop,
 		DealerPos:      dealerPos,
-		TurnPos:        nextActiveSeat(players, dealerPos),
+		SmallBlindPos:  sbPos,
+		BigBlindPos:    bbPos,
 		CommunityCards: make([]Card, 0, 5),
 		Players:        players,
 		Deck:           NewDeck(),
-		RoundBet:       0,
+		RoundBet:       bigBlind,
 		OpenBetMin:     openBetMin,
 		BetMin:         betMin,
 		HasActed:       map[string]bool{},
@@ -88,6 +110,34 @@ func NewGame(players []*GamePlayer, dealerPos int, openBetMin int, betMin int) (
 		p.HoleCards = []Card{gs.draw(), gs.draw()}
 		gs.HasActed[p.UserID] = false
 	}
+
+	// 小盲下注
+	sb := gs.Players[sbPos]
+	sbAmount := smallBlind
+	if sb.Stack < sbAmount {
+		sbAmount = sb.Stack
+	}
+	sb.Stack -= sbAmount
+	sb.Contributed = sbAmount
+	sb.RoundContrib = sbAmount
+	sb.LastAction = "small_blind"
+	gs.Pot += sbAmount
+
+	// 大盲下注
+	bb := gs.Players[bbPos]
+	bbAmount := bigBlind
+	if bb.Stack < bbAmount {
+		bbAmount = bb.Stack
+	}
+	bb.Stack -= bbAmount
+	bb.Contributed = bbAmount
+	bb.RoundContrib = bbAmount
+	bb.LastAction = "big_blind"
+	gs.Pot += bbAmount
+
+	// 翻牌前行动从大盲下一位开始
+	gs.TurnPos = nextActiveSeat(players, bbPos)
+
 	return gs, nil
 }
 
@@ -107,9 +157,6 @@ func (g *GameState) ApplyAction(userID, action string, amount int) error {
 	case "check":
 		if g.RoundBet != current.RoundContrib {
 			return errors.New("cannot check when bet exists")
-		}
-		if g.Stage == StagePreflop && g.RoundBet == 0 {
-			return errors.New("must bet in preflop")
 		}
 		current.LastAction = "check"
 	case "call":
