@@ -32,6 +32,14 @@ type GamePlayer struct {
 	BestHandCards []Card
 }
 
+type ActionLog struct {
+	UserID   string `json:"userId"`
+	Username string `json:"username"`
+	Action   string `json:"action"`
+	Amount   int    `json:"amount"`
+	Stage    string `json:"stage"`
+}
+
 type GameResult struct {
 	Winners []string
 	Reason  string
@@ -54,6 +62,7 @@ type GameState struct {
 	BetMin     int
 	HasActed   map[string]bool
 	Result     *GameResult
+	ActionLogs []ActionLog
 }
 
 func NewGame(players []*GamePlayer, dealerPos int, openBetMin int, betMin int) (*GameState, error) {
@@ -97,6 +106,7 @@ func NewGame(players []*GamePlayer, dealerPos int, openBetMin int, betMin int) (
 		OpenBetMin:     openBetMin,
 		BetMin:         betMin,
 		HasActed:       map[string]bool{},
+		ActionLogs:     make([]ActionLog, 0),
 	}
 	Shuffle(gs.Deck)
 	for _, p := range gs.Players {
@@ -122,6 +132,10 @@ func NewGame(players []*GamePlayer, dealerPos int, openBetMin int, betMin int) (
 	sb.RoundContrib = sbAmount
 	sb.LastAction = "small_blind"
 	gs.Pot += sbAmount
+	gs.ActionLogs = append(gs.ActionLogs, ActionLog{
+		UserID: sb.UserID, Username: sb.Username,
+		Action: "small_blind", Amount: sbAmount, Stage: string(StagePreflop),
+	})
 
 	// 大盲下注
 	bb := gs.Players[bbPos]
@@ -134,6 +148,10 @@ func NewGame(players []*GamePlayer, dealerPos int, openBetMin int, betMin int) (
 	bb.RoundContrib = bbAmount
 	bb.LastAction = "big_blind"
 	gs.Pot += bbAmount
+	gs.ActionLogs = append(gs.ActionLogs, ActionLog{
+		UserID: bb.UserID, Username: bb.Username,
+		Action: "big_blind", Amount: bbAmount, Stage: string(StagePreflop),
+	})
 
 	// 翻牌前行动从大盲下一位开始
 	gs.TurnPos = nextActiveSeat(players, bbPos)
@@ -159,6 +177,10 @@ func (g *GameState) ApplyAction(userID, action string, amount int) error {
 			return errors.New("cannot check when bet exists")
 		}
 		current.LastAction = "check"
+		g.ActionLogs = append(g.ActionLogs, ActionLog{
+			UserID: current.UserID, Username: current.Username,
+			Action: "check", Amount: 0, Stage: string(g.Stage),
+		})
 	case "call":
 		diff := g.RoundBet - current.RoundContrib
 		if diff <= 0 {
@@ -172,6 +194,10 @@ func (g *GameState) ApplyAction(userID, action string, amount int) error {
 		current.RoundContrib += diff
 		g.Pot += diff
 		current.LastAction = "call"
+		g.ActionLogs = append(g.ActionLogs, ActionLog{
+			UserID: current.UserID, Username: current.Username,
+			Action: "call", Amount: diff, Stage: string(g.Stage),
+		})
 	case "bet":
 		if amount <= 0 {
 			return errors.New("bet amount must be positive")
@@ -195,6 +221,10 @@ func (g *GameState) ApplyAction(userID, action string, amount int) error {
 		g.Pot += amount
 		g.RoundBet = current.RoundContrib
 		current.LastAction = "bet"
+		g.ActionLogs = append(g.ActionLogs, ActionLog{
+			UserID: current.UserID, Username: current.Username,
+			Action: "bet", Amount: amount, Stage: string(g.Stage),
+		})
 		for _, p := range g.activePlayers() {
 			if p.UserID != current.UserID {
 				g.HasActed[p.UserID] = false
@@ -203,6 +233,10 @@ func (g *GameState) ApplyAction(userID, action string, amount int) error {
 	case "fold":
 		current.Folded = true
 		current.LastAction = "fold"
+		g.ActionLogs = append(g.ActionLogs, ActionLog{
+			UserID: current.UserID, Username: current.Username,
+			Action: "fold", Amount: 0, Stage: string(g.Stage),
+		})
 	default:
 		return fmt.Errorf("unsupported action: %s", action)
 	}

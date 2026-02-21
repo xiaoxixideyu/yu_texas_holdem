@@ -41,7 +41,7 @@
         <div class="room-item">
           <div>
             <strong>${r.name}</strong>
-            <div class="hint">${r.players.length}/${r.maxPlayers} 人 · ${roomStatusText(r.status)} · 开局≥${r.openBetMin || 10} · 加注≥${r.betMin || 10}</div>
+            <div class="hint">${r.players.length} 人 · ${roomStatusText(r.status)} · 开局≥${r.openBetMin || 10} · 加注≥${r.betMin || 10}</div>
           </div>
           <button onclick="joinRoom('${r.roomId}')">进入</button>
         </div>
@@ -62,13 +62,12 @@
   document.getElementById("create-room-form").addEventListener("submit", async (e) => {
     e.preventDefault();
     const name = document.getElementById("room-name").value.trim() || "房间";
-    const maxPlayers = Number(document.getElementById("max-players").value || 4);
     const openBetMin = Number(document.getElementById("open-bet-min").value) || 10;
     const betMin = Number(document.getElementById("bet-min").value) || 10;
     try {
       const room = await api("/api/v1/rooms", {
         method: "POST",
-        body: { name, maxPlayers, openBetMin, betMin },
+        body: { name, openBetMin, betMin },
       });
       location.href = `/game.html?roomId=${room.roomId}`;
     } catch (err) {

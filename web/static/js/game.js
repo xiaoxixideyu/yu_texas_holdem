@@ -68,6 +68,25 @@ function toHandText(name) {
   return HAND_TEXT[name] || name || "-";
 }
 
+function renderHandLog(data) {
+  const el = document.getElementById("hand-log");
+  if (!el) return;
+  if (!data.game || !data.game.actionLogs || !data.game.actionLogs.length) {
+    el.textContent = "暂无记录";
+    return;
+  }
+  el.textContent = data.game.actionLogs
+    .map((log) => {
+      const action = toActionText(log.action);
+      const stage = toStageText(log.stage);
+      if (log.amount > 0) {
+        return `[${stage}] ${log.username} ${action} ${log.amount}`;
+      }
+      return `[${stage}] ${log.username} ${action}`;
+    })
+    .join("\n");
+}
+
 function getCurrentPlayer(data) {
   if (!data || !data.game || !Array.isArray(data.game.players)) return null;
   return data.game.players.find((p) => p.userId === currentUserId) || null;
@@ -224,6 +243,7 @@ function renderState(data) {
     updateMyStack(data);
     updateOwnerActions(data);
     updateActionButtons(data);
+    renderHandLog(data);
     return;
   }
 
@@ -282,7 +302,7 @@ function renderState(data) {
           <div class="player-avatar">${(p.username || "?")[0]}</div>
           <div class="player-info">
             <div class="player-name">${p.username} ${badges.join(" ")}</div>
-            <div class="player-details">筹码 ${p.stack} · ${toActionText(p.lastAction)}${bestHand}</div>
+            <div class="player-details">筹码 ${p.stack} · 押注 ${p.contributed || 0} · ${toActionText(p.lastAction)}${bestHand}</div>
           </div>
           <div class="player-cards">${holeCardsHtml}</div>
         </div>`;
@@ -293,6 +313,7 @@ function renderState(data) {
   updateMyStack(data);
   updateOwnerActions(data);
   updateActionButtons(data);
+  renderHandLog(data);
 }
 
 function cardText(c) {

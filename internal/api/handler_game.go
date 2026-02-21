@@ -28,6 +28,7 @@ type gamePlayerView struct {
 	Folded       bool          `json:"folded"`
 	LastAction   string        `json:"lastAction"`
 	Won          int           `json:"won"`
+	Contributed  int           `json:"contributed"`
 	BestHandName string        `json:"bestHandName,omitempty"`
 	HoleCards    []domain.Card `json:"holeCards,omitempty"`
 	IsTurn       bool          `json:"isTurn"`
@@ -132,6 +133,7 @@ func (h *GameHandler) GetState(w http.ResponseWriter, r *http.Request, s *store.
 			Folded:       p.Folded,
 			LastAction:   p.LastAction,
 			Won:          p.Won,
+			Contributed:  p.Contributed,
 			BestHandName: p.BestHandName,
 			IsTurn:       isTurn,
 			CanCheck:     canCheck,
@@ -161,6 +163,7 @@ func (h *GameHandler) GetState(w http.ResponseWriter, r *http.Request, s *store.
 		"result":         room.Game.Result,
 		"openBetMin":     room.Game.OpenBetMin,
 		"betMin":         room.Game.BetMin,
+		"actionLogs":     room.Game.ActionLogs,
 	}
 	writeJSON(w, http.StatusOK, resp)
 }

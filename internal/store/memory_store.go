@@ -35,7 +35,6 @@ type RoomPlayer struct {
 type Room struct {
 	RoomID        string       `json:"roomId"`
 	Name          string       `json:"name"`
-	MaxPlayers    int          `json:"maxPlayers"`
 	OpenBetMin    int          `json:"openBetMin"`
 	BetMin        int          `json:"betMin"`
 	OwnerUserID   string       `json:"ownerUserId"`
@@ -114,12 +113,11 @@ func (m *MemoryStore) ListRooms() ([]Room, int64) {
 	return list, m.roomsVersion
 }
 
-func (m *MemoryStore) CreateRoom(owner *Session, name string, maxPlayers int, openBetMin int, betMin int) *Room {
+func (m *MemoryStore) CreateRoom(owner *Session, name string, openBetMin int, betMin int) *Room {
 	rid := atomic.AddInt64(&m.nextRoom, 1)
 	r := &Room{
 		RoomID:        fmt.Sprintf("r-%d", rid),
 		Name:          name,
-		MaxPlayers:    maxPlayers,
 		OpenBetMin:    openBetMin,
 		BetMin:        betMin,
 		OwnerUserID:   owner.UserID,
@@ -152,9 +150,6 @@ func (m *MemoryStore) JoinRoom(roomID string, s *Session) (*Room, error) {
 	}
 	if r.Status != RoomWaiting {
 		return nil, errors.New("room already playing")
-	}
-	if len(r.Players) >= r.MaxPlayers {
-		return nil, errors.New("room full")
 	}
 	r.Players = append(r.Players, RoomPlayer{UserID: s.UserID, Username: s.Username, Seat: len(r.Players), Stack: 10000})
 	r.StateVersion++

@@ -14,7 +14,6 @@ type RoomHandler struct {
 
 type createRoomReq struct {
 	Name       string `json:"name"`
-	MaxPlayers int    `json:"maxPlayers"`
 	OpenBetMin int    `json:"openBetMin"`
 	BetMin     int    `json:"betMin"`
 }
@@ -52,16 +51,13 @@ func (h *RoomHandler) CreateRoom(w http.ResponseWriter, r *http.Request, s *stor
 	if req.Name == "" {
 		req.Name = "Room"
 	}
-	if req.MaxPlayers < 2 || req.MaxPlayers > 10 {
-		req.MaxPlayers = 4
-	}
 	if req.OpenBetMin <= 0 {
 		req.OpenBetMin = 10
 	}
 	if req.BetMin <= 0 {
 		req.BetMin = 10
 	}
-	room := h.Store.CreateRoom(s, req.Name, req.MaxPlayers, req.OpenBetMin, req.BetMin)
+	room := h.Store.CreateRoom(s, req.Name, req.OpenBetMin, req.BetMin)
 	writeJSON(w, http.StatusOK, room)
 }
 
