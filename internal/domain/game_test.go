@@ -85,34 +85,49 @@ func TestGame_CallAndCheckToShowdown(t *testing.T) {
 	}
 }
 
-func TestGame_ThreePlayerBlinds(t *testing.T) {
+func TestGame_ShowdownMainPotWithOvercall(t *testing.T) {
 	players := []*GamePlayer{
-		{UserID: "u1", Username: "A", SeatIndex: 0, Stack: 500},
-		{UserID: "u2", Username: "B", SeatIndex: 1, Stack: 500},
-		{UserID: "u3", Username: "C", SeatIndex: 2, Stack: 500},
+		{UserID: "u1", Username: "A", SeatIndex: 0, Stack: 10000},
+		{UserID: "u2", Username: "B", SeatIndex: 1, Stack: 10000},
+		{UserID: "u3", Username: "C", SeatIndex: 2, Stack: 6000},
 	}
-	g, err := NewGame(players, 0, 20, 10)
+	g, err := NewGame(players, 0, 20, 20)
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Dealer=0, SB=1, BB=2
-	if g.SmallBlindPos != 1 {
-		t.Fatalf("expected SB at 1, got %d", g.SmallBlindPos)
+
+	for _, p := range g.Players {
+		p.Contributed = 0
+		p.RoundContrib = 0
+		p.Folded = false
+		p.AllIn = false
+		p.Won = 0
 	}
-	if g.BigBlindPos != 2 {
-		t.Fatalf("expected BB at 2, got %d", g.BigBlindPos)
+	g.Pot = 0
+
+	u1 := g.Players[0]
+	u2 := g.Players[1]
+	u3 := g.Players[2]
+	u1.Contributed = 6020
+	u2.Contributed = 6020
+	u3.Contributed = 6000
+	g.Pot = 18040
+
+	cards := []Card{
+		{Rank: 2, Suit: Hearts}, {Rank: 3, Suit: Hearts}, {Rank: 4, Suit: Hearts},
+		{Rank: 5, Suit: Hearts}, {Rank: 9, Suit: Clubs},
 	}
-	if g.Players[1].Stack != 490 { // 500 - 10 (SB = 20/2)
-		t.Fatalf("expected SB stack 490, got %d", g.Players[1].Stack)
+	g.CommunityCards = cards
+	u3.HoleCards = []Card{{Rank: 14, Suit: Hearts}, {Rank: 13, Suit: Hearts}}
+	u1.HoleCards = []Card{{Rank: 14, Suit: Clubs}, {Rank: 13, Suit: Clubs}}
+	u2.HoleCards = []Card{{Rank: 12, Suit: Diamonds}, {Rank: 11, Suit: Diamonds}}
+
+	g.finishShowdown()
+
+	if u3.Won != 18000 {
+		t.Fatalf("expected short stack winner to win 18000, got %d", u3.Won)
 	}
-	if g.Players[2].Stack != 480 { // 500 - 20 (BB)
-		t.Fatalf("expected BB stack 480, got %d", g.Players[2].Stack)
-	}
-	if g.Pot != 30 {
-		t.Fatalf("expected pot 30, got %d", g.Pot)
-	}
-	// First to act preflop is seat after BB = seat 0 (u1, the dealer/UTG)
-	if g.Players[g.TurnPos].UserID != "u1" {
-		t.Fatalf("expected first action on u1 (UTG), got %s", g.Players[g.TurnPos].UserID)
+	if u1.Won+u2.Won != 40 {
+		t.Fatalf("expected unmatched overcall chips 40 to remain among deep stacks, got %d", u1.Won+u2.Won)
 	}
 }

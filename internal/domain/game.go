@@ -403,7 +403,14 @@ func (g *GameState) finishShowdown() {
 			prev = level
 			continue
 		}
-		potPart := (level - prev) * len(eligible)
+		potPart := 0
+		for _, p := range g.Players {
+			if p.Contributed >= level {
+				potPart += level - prev
+			} else if p.Contributed > prev {
+				potPart += p.Contributed - prev
+			}
+		}
 		if potPart <= 0 {
 			prev = level
 			continue
