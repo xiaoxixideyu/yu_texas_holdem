@@ -24,6 +24,7 @@ type GamePlayer struct {
 	Stack         int
 	HoleCards     []Card
 	Folded        bool
+	AllIn         bool
 	Contributed   int
 	RoundContrib  int
 	Won           int
@@ -58,7 +59,7 @@ type GameState struct {
 	Deck       []Card
 	DeckPos    int
 	RoundBet   int
-	OpenBetMin int // 大盲金额
+	OpenBetMin int
 	BetMin     int
 	HasActed   map[string]bool
 	Result     *GameResult
@@ -82,16 +83,13 @@ func NewGame(players []*GamePlayer, dealerPos int, openBetMin int, betMin int) (
 		smallBlind = 1
 	}
 
-	// 计算大小盲位置
 	var sbPos, bbPos int
 	if len(players) == 2 {
-		// Heads-up: 庄家 = 小盲，另一位 = 大盲
 		sbPos = dealerPos
-		bbPos = nextActiveSeat(players, dealerPos)
+		bbPos = nextEligibleSeat(players, dealerPos)
 	} else {
-		// 3+人: 庄家下一位 = 小盲，再下一位 = 大盲
-		sbPos = nextActiveSeat(players, dealerPos)
-		bbPos = nextActiveSeat(players, sbPos)
+		sbPos = nextEligibleSeat(players, dealerPos)
+		bbPos = nextEligibleSeat(players, sbPos)
 	}
 
 	gs := &GameState{
@@ -111,6 +109,7 @@ func NewGame(players []*GamePlayer, dealerPos int, openBetMin int, betMin int) (
 	Shuffle(gs.Deck)
 	for _, p := range gs.Players {
 		p.Folded = false
+		p.AllIn = false
 		p.Contributed = 0
 		p.RoundContrib = 0
 		p.Won = 0
@@ -121,7 +120,6 @@ func NewGame(players []*GamePlayer, dealerPos int, openBetMin int, betMin int) (
 		gs.HasActed[p.UserID] = false
 	}
 
-	// 小盲下注
 	sb := gs.Players[sbPos]
 	sbAmount := smallBlind
 	if sb.Stack < sbAmount {
@@ -130,14 +128,13 @@ func NewGame(players []*GamePlayer, dealerPos int, openBetMin int, betMin int) (
 	sb.Stack -= sbAmount
 	sb.Contributed = sbAmount
 	sb.RoundContrib = sbAmount
+	if sb.Stack == 0 {
+		sb.AllIn = true
+	}
 	sb.LastAction = "small_blind"
 	gs.Pot += sbAmount
-	gs.ActionLogs = append(gs.ActionLogs, ActionLog{
-		UserID: sb.UserID, Username: sb.Username,
-		Action: "small_blind", Amount: sbAmount, Stage: string(StagePreflop),
-	})
+	gs.ActionLogs = append(gs.ActionLogs, ActionLog{UserID: sb.UserID, Username: sb.Username, Action: "small_blind", Amount: sbAmount, Stage: string(StagePreflop)})
 
-	// 大盲下注
 	bb := gs.Players[bbPos]
 	bbAmount := bigBlind
 	if bb.Stack < bbAmount {
@@ -146,15 +143,15 @@ func NewGame(players []*GamePlayer, dealerPos int, openBetMin int, betMin int) (
 	bb.Stack -= bbAmount
 	bb.Contributed = bbAmount
 	bb.RoundContrib = bbAmount
+	if bb.Stack == 0 {
+		bb.AllIn = true
+	}
 	bb.LastAction = "big_blind"
 	gs.Pot += bbAmount
-	gs.ActionLogs = append(gs.ActionLogs, ActionLog{
-		UserID: bb.UserID, Username: bb.Username,
-		Action: "big_blind", Amount: bbAmount, Stage: string(StagePreflop),
-	})
+	gs.ActionLogs = append(gs.ActionLogs, ActionLog{UserID: bb.UserID, Username: bb.Username, Action: "big_blind", Amount: bbAmount, Stage: string(StagePreflop)})
 
-	// 翻牌前行动从大盲下一位开始
-	gs.TurnPos = nextActiveSeat(players, bbPos)
+	gs.TurnPos = nextTurnSeat(gs.Players, bbPos)
+	gs.ensureTurnPlayable()
 
 	return gs, nil
 }
@@ -170,6 +167,9 @@ func (g *GameState) ApplyAction(userID, action string, amount int) error {
 	if current.Folded {
 		return errors.New("player already folded")
 	}
+	if current.AllIn {
+		return errors.New("player already all-in")
+	}
 
 	switch action {
 	case "check":
@@ -177,66 +177,85 @@ func (g *GameState) ApplyAction(userID, action string, amount int) error {
 			return errors.New("cannot check when bet exists")
 		}
 		current.LastAction = "check"
-		g.ActionLogs = append(g.ActionLogs, ActionLog{
-			UserID: current.UserID, Username: current.Username,
-			Action: "check", Amount: 0, Stage: string(g.Stage),
-		})
+		g.ActionLogs = append(g.ActionLogs, ActionLog{UserID: current.UserID, Username: current.Username, Action: "check", Amount: 0, Stage: string(g.Stage)})
 	case "call":
 		diff := g.RoundBet - current.RoundContrib
 		if diff <= 0 {
 			return errors.New("nothing to call")
 		}
-		if current.Stack < diff {
+		if current.Stack <= 0 {
 			return errors.New("not enough stack to call")
 		}
-		current.Stack -= diff
-		current.Contributed += diff
-		current.RoundContrib += diff
-		g.Pot += diff
-		current.LastAction = "call"
-		g.ActionLogs = append(g.ActionLogs, ActionLog{
-			UserID: current.UserID, Username: current.Username,
-			Action: "call", Amount: diff, Stage: string(g.Stage),
-		})
-	case "bet":
-		if amount <= 0 {
-			return errors.New("bet amount must be positive")
+		pay := diff
+		if current.Stack < pay {
+			pay = current.Stack
 		}
-		if g.RoundBet == 0 {
-			if amount < g.OpenBetMin {
-				return fmt.Errorf("open bet must be at least %d", g.OpenBetMin)
-			}
+		current.Stack -= pay
+		current.Contributed += pay
+		current.RoundContrib += pay
+		g.Pot += pay
+		if current.Stack == 0 {
+			current.AllIn = true
+			current.LastAction = "allin"
+			g.ActionLogs = append(g.ActionLogs, ActionLog{UserID: current.UserID, Username: current.Username, Action: "allin", Amount: pay, Stage: string(g.Stage)})
 		} else {
-			need := (g.RoundBet - current.RoundContrib) + g.BetMin
-			if amount < need {
-				return fmt.Errorf("raise must be at least %d", need)
-			}
+			current.LastAction = "call"
+			g.ActionLogs = append(g.ActionLogs, ActionLog{UserID: current.UserID, Username: current.Username, Action: "call", Amount: pay, Stage: string(g.Stage)})
 		}
-		if current.Stack < amount {
+	case "bet", "allin":
+		if current.Stack <= 0 {
 			return errors.New("not enough stack to bet")
 		}
-		current.Stack -= amount
-		current.Contributed += amount
-		current.RoundContrib += amount
-		g.Pot += amount
-		g.RoundBet = current.RoundContrib
-		current.LastAction = "bet"
-		g.ActionLogs = append(g.ActionLogs, ActionLog{
-			UserID: current.UserID, Username: current.Username,
-			Action: "bet", Amount: amount, Stage: string(g.Stage),
-		})
-		for _, p := range g.activePlayers() {
-			if p.UserID != current.UserID {
-				g.HasActed[p.UserID] = false
+		commit := amount
+		if action == "allin" {
+			commit = current.Stack
+		}
+		if commit <= 0 {
+			return errors.New("bet amount must be positive")
+		}
+		if commit > current.Stack {
+			return errors.New("not enough stack to bet")
+		}
+		targetRoundContrib := current.RoundContrib + commit
+		raises := targetRoundContrib > g.RoundBet
+		if action != "allin" {
+			if g.RoundBet == 0 {
+				if commit < g.OpenBetMin {
+					return fmt.Errorf("open bet must be at least %d", g.OpenBetMin)
+				}
+			} else {
+				need := (g.RoundBet - current.RoundContrib) + g.BetMin
+				if commit < need {
+					return fmt.Errorf("raise must be at least %d", need)
+				}
+			}
+		}
+		current.Stack -= commit
+		current.Contributed += commit
+		current.RoundContrib += commit
+		g.Pot += commit
+		if raises {
+			g.RoundBet = current.RoundContrib
+		}
+		if current.Stack == 0 || action == "allin" {
+			current.AllIn = true
+			current.LastAction = "allin"
+			g.ActionLogs = append(g.ActionLogs, ActionLog{UserID: current.UserID, Username: current.Username, Action: "allin", Amount: commit, Stage: string(g.Stage)})
+		} else {
+			current.LastAction = "bet"
+			g.ActionLogs = append(g.ActionLogs, ActionLog{UserID: current.UserID, Username: current.Username, Action: "bet", Amount: commit, Stage: string(g.Stage)})
+		}
+		if raises {
+			for _, p := range g.activePlayers() {
+				if p.UserID != current.UserID && !p.AllIn {
+					g.HasActed[p.UserID] = false
+				}
 			}
 		}
 	case "fold":
 		current.Folded = true
 		current.LastAction = "fold"
-		g.ActionLogs = append(g.ActionLogs, ActionLog{
-			UserID: current.UserID, Username: current.Username,
-			Action: "fold", Amount: 0, Stage: string(g.Stage),
-		})
+		g.ActionLogs = append(g.ActionLogs, ActionLog{UserID: current.UserID, Username: current.Username, Action: "fold", Amount: 0, Stage: string(g.Stage)})
 	default:
 		return fmt.Errorf("unsupported action: %s", action)
 	}
@@ -253,13 +272,17 @@ func (g *GameState) ApplyAction(userID, action string, amount int) error {
 		return nil
 	}
 
-	g.TurnPos = nextActiveSeat(g.Players, g.TurnPos)
+	g.TurnPos = nextTurnSeat(g.Players, g.TurnPos)
+	g.ensureTurnPlayable()
 	return nil
 }
 
 func (g *GameState) roundComplete() bool {
 	for _, p := range g.Players {
 		if p.Folded {
+			continue
+		}
+		if p.AllIn {
 			continue
 		}
 		if !g.HasActed[p.UserID] {
@@ -290,13 +313,18 @@ func (g *GameState) advanceStage() {
 	}
 	for _, p := range g.Players {
 		p.RoundContrib = 0
-		if p.Folded {
+		if p.Folded || p.AllIn {
 			continue
 		}
 		g.HasActed[p.UserID] = false
 	}
 	g.RoundBet = 0
-	g.TurnPos = nextActiveSeat(g.Players, g.DealerPos)
+	if len(g.Players) == 2 {
+		g.TurnPos = g.BigBlindPos
+	} else {
+		g.TurnPos = nextTurnSeat(g.Players, g.DealerPos)
+	}
+	g.ensureTurnPlayable()
 }
 
 func (g *GameState) finishByLastStanding() {
@@ -336,28 +364,138 @@ func (g *GameState) finishShowdown() {
 		p.BestHandCards = bestCards
 		cands = append(cands, candidate{p: p, value: best})
 	}
-	sort.Slice(cands, func(i, j int) bool {
-		return CompareHandValue(cands[i].value, cands[j].value) > 0
-	})
-	best := cands[0].value
-	winners := []*GamePlayer{cands[0].p}
-	for i := 1; i < len(cands); i++ {
-		if CompareHandValue(cands[i].value, best) == 0 {
-			winners = append(winners, cands[i].p)
+	strength := make(map[string]HandValue, len(cands))
+	for _, c := range cands {
+		strength[c.p.UserID] = c.value
+	}
+
+	for _, p := range g.Players {
+		p.Won = 0
+	}
+
+	for _, p := range g.Players {
+		if p.Folded {
+			continue
+		}
+		if p.Contributed > g.PotEligibleCap() {
+			// no-op safeguard; normally impossible
 		}
 	}
-	share := 0
-	if len(winners) > 0 {
-		share = g.Pot / len(winners)
+
+	refund := g.refundUnmatchedChips()
+	if refund > 0 {
+		g.Pot -= refund
 	}
-	winnerIDs := make([]string, 0, len(winners))
-	for _, w := range winners {
-		w.Stack += share
-		w.Won = share
-		winnerIDs = append(winnerIDs, w.UserID)
+
+	levels := uniqueContributionLevels(active)
+	prev := 0
+	for _, level := range levels {
+		if level <= prev {
+			continue
+		}
+		eligible := make([]*GamePlayer, 0, len(active))
+		for _, p := range active {
+			if p.Contributed >= level {
+				eligible = append(eligible, p)
+			}
+		}
+		if len(eligible) == 0 {
+			prev = level
+			continue
+		}
+		potPart := (level - prev) * len(eligible)
+		if potPart <= 0 {
+			prev = level
+			continue
+		}
+		winners := bestPlayers(eligible, strength)
+		share := potPart / len(winners)
+		rest := potPart % len(winners)
+		for i, w := range winners {
+			win := share
+			if i < rest {
+				win++
+			}
+			w.Stack += win
+			w.Won += win
+		}
+		prev = level
+	}
+
+	winnerIDs := make([]string, 0)
+	for _, p := range g.Players {
+		if p.Won > 0 {
+			winnerIDs = append(winnerIDs, p.UserID)
+		}
+	}
+	if len(winnerIDs) == 0 && len(active) > 0 {
+		winnerIDs = append(winnerIDs, active[0].UserID)
 	}
 	g.Result = &GameResult{Winners: winnerIDs, Reason: "showdown"}
 	g.Stage = StageFinished
+}
+
+func (g *GameState) refundUnmatchedChips() int {
+	active := g.activePlayers()
+	if len(active) < 2 {
+		return 0
+	}
+	max1 := -1
+	max2 := -1
+	var top *GamePlayer
+	for _, p := range active {
+		if p.Contributed > max1 {
+			max2 = max1
+			max1 = p.Contributed
+			top = p
+		} else if p.Contributed > max2 {
+			max2 = p.Contributed
+		}
+	}
+	if top == nil || max1 <= max2 {
+		return 0
+	}
+	refund := max1 - max2
+	top.Contributed -= refund
+	top.Stack += refund
+	return refund
+}
+
+func uniqueContributionLevels(players []*GamePlayer) []int {
+	set := map[int]struct{}{}
+	for _, p := range players {
+		if p.Contributed > 0 {
+			set[p.Contributed] = struct{}{}
+		}
+	}
+	out := make([]int, 0, len(set))
+	for v := range set {
+		out = append(out, v)
+	}
+	sort.Ints(out)
+	return out
+}
+
+func bestPlayers(players []*GamePlayer, strength map[string]HandValue) []*GamePlayer {
+	if len(players) == 0 {
+		return nil
+	}
+	best := players[0]
+	winners := []*GamePlayer{best}
+	for i := 1; i < len(players); i++ {
+		cmp := CompareHandValue(strength[players[i].UserID], strength[best.UserID])
+		if cmp > 0 {
+			best = players[i]
+			winners = []*GamePlayer{players[i]}
+		} else if cmp == 0 {
+			winners = append(winners, players[i])
+		}
+	}
+	return winners
+}
+
+func (g *GameState) PotEligibleCap() int {
+	return g.Pot
 }
 
 func (g *GameState) draw() Card {
@@ -386,6 +524,19 @@ func (g *GameState) countActive() int {
 	return count
 }
 
+func (g *GameState) ensureTurnPlayable() {
+	for i := 0; i < len(g.Players); i++ {
+		p := g.Players[g.TurnPos]
+		if !p.Folded && !p.AllIn {
+			return
+		}
+		g.TurnPos = nextTurnSeat(g.Players, g.TurnPos)
+	}
+	if g.roundComplete() {
+		g.advanceStage()
+	}
+}
+
 func (g *GameState) ForceLeaveForStore(userID string) {
 	if g.Stage == StageFinished || g.Stage == StageShowdown {
 		return
@@ -402,9 +553,10 @@ func (g *GameState) ForceLeaveForStore(userID string) {
 		g.finishByLastStanding()
 		return
 	}
-	if g.Players[g.TurnPos].UserID == userID || g.Players[g.TurnPos].Folded {
-		g.TurnPos = nextActiveSeat(g.Players, g.TurnPos)
+	if g.Players[g.TurnPos].UserID == userID || g.Players[g.TurnPos].Folded || g.Players[g.TurnPos].AllIn {
+		g.TurnPos = nextTurnSeat(g.Players, g.TurnPos)
 	}
+	g.ensureTurnPlayable()
 	if g.roundComplete() {
 		g.advanceStage()
 	}
@@ -418,11 +570,22 @@ func (g *GameState) FinishByLastStandingForStore() {
 	g.finishByLastStanding()
 }
 
-func nextActiveSeat(players []*GamePlayer, pos int) int {
+func nextEligibleSeat(players []*GamePlayer, pos int) int {
 	n := len(players)
 	for i := 1; i <= n; i++ {
 		next := (pos + i) % n
 		if !players[next].Folded {
+			return next
+		}
+	}
+	return pos
+}
+
+func nextTurnSeat(players []*GamePlayer, pos int) int {
+	n := len(players)
+	for i := 1; i <= n; i++ {
+		next := (pos + i) % n
+		if !players[next].Folded && !players[next].AllIn {
 			return next
 		}
 	}

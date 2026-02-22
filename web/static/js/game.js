@@ -13,6 +13,7 @@ const ACTION_TEXT = {
   call: "跟注",
   bet: "下注",
   raise: "加注",
+  allin: "梭哈",
   fold: "弃牌",
   leave: "离开房间",
   small_blind: "小盲",
@@ -98,6 +99,7 @@ function updateActionButtons(data) {
     call: document.querySelector('button[data-action="call"]'),
     bet: document.querySelector('button[data-action="bet"]'),
     raise: document.querySelector('button[data-action="raise"]'),
+    allin: document.querySelector('button[data-action="allin"]'),
     fold: document.querySelector('button[data-action="fold"]'),
   };
 
@@ -125,10 +127,13 @@ function updateActionButtons(data) {
     return;
   }
 
+  const canAllIn = !!(me.isTurn && !me.folded && typeof me.stack === "number" && me.stack > 0);
+
   buttons.check.disabled = !me.canCheck;
   buttons.call.disabled = !me.canCall;
   buttons.bet.disabled = !me.canBet;
   buttons.raise.disabled = !me.canRaise;
+  if (buttons.allin) buttons.allin.disabled = !canAllIn;
   buttons.fold.disabled = !me.canFold;
 
   if (callAmountLabel) {
@@ -153,6 +158,7 @@ function updateActionButtons(data) {
   if (buttons.call) buttons.call.title = me.canCall ? `跟注 ${me.callAmount}` : "当前不可跟注";
   if (buttons.bet) buttons.bet.title = me.canBet ? `下注（最低 ${me.minBet}）` : "当前不可下注";
   if (buttons.raise) buttons.raise.title = me.canRaise ? `加注（最低 ${me.minRaise}）` : "当前不可加注";
+  if (buttons.allin) buttons.allin.title = canAllIn ? `梭哈（全下 ${me.stack}）` : "当前不可梭哈";
   if (buttons.fold) buttons.fold.title = me.canFold ? "执行弃牌" : "当前不可弃牌";
 
   const availableActions = [];
@@ -160,6 +166,7 @@ function updateActionButtons(data) {
   if (me.canCall) availableActions.push(`跟注(${me.callAmount})`);
   if (me.canBet) availableActions.push(`下注(≥${me.minBet})`);
   if (me.canRaise) availableActions.push(`加注(≥${me.minRaise})`);
+  if (canAllIn) availableActions.push(`梭哈(${me.stack})`);
   if (me.canFold) availableActions.push("弃牌");
 
   if (actionHint) {
@@ -369,6 +376,13 @@ async function doAction(type) {
       type,
       expectedVersion: stateVersion,
     };
+    if (type === "allin") {
+      const yes = window.confirm("确认梭哈吗？此操作会将你当前剩余筹码全部投入本轮。\n梭哈后你将无法继续下注，只能等待比牌结果。");
+      if (!yes) {
+        logLine("已取消梭哈");
+        return;
+      }
+    }
     if (type === "bet" || type === "raise") {
       const input = document.getElementById("bet-amount");
       const amount = Number(input ? input.value : 0);
@@ -444,4 +458,5 @@ function resetPolling(ms) {
   resetPolling(1200);
   loadState();
 })();
+
 
