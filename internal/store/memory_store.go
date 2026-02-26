@@ -372,6 +372,34 @@ func (m *MemoryStore) ApplyAction(roomID, userID, actionID, action string, amoun
 	return r, nil
 }
 
+func (m *MemoryStore) ApplyReveal(roomID, userID, actionID string, mask int, expectedVersion int64) (*Room, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	r, ok := m.rooms[roomID]
+	if !ok {
+		return nil, errors.New("room not found")
+	}
+	if r.Game == nil {
+		return nil, errors.New("game not started")
+	}
+	if expectedVersion != r.StateVersion {
+		return nil, errors.New("version conflict")
+	}
+	if actionID != "" && r.ActionSeen[actionID] {
+		return r, nil
+	}
+	if err := r.Game.SetRevealSelection(userID, mask); err != nil {
+		return nil, err
+	}
+	if actionID != "" {
+		r.ActionSeen[actionID] = true
+	}
+	r.StateVersion++
+	r.UpdatedAtUnix = time.Now().Unix()
+	m.roomsVersion++
+	return r, nil
+}
+
 func (m *MemoryStore) TouchUser(userID string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()

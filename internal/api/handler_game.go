@@ -17,29 +17,32 @@ type actionReq struct {
 	ActionID        string `json:"actionId"`
 	Type            string `json:"type"`
 	Amount          int    `json:"amount"`
+	RevealMask      int    `json:"revealMask,omitempty"`
 	ExpectedVersion int64  `json:"expectedVersion"`
 }
 
 type gamePlayerView struct {
-	UserID       string        `json:"userId"`
-	Username     string        `json:"username"`
-	SeatIndex    int           `json:"seatIndex"`
-	Stack        int           `json:"stack"`
-	Folded       bool          `json:"folded"`
-	LastAction   string        `json:"lastAction"`
-	Won          int           `json:"won"`
-	Contributed  int           `json:"contributed"`
-	BestHandName string        `json:"bestHandName,omitempty"`
-	HoleCards    []domain.Card `json:"holeCards,omitempty"`
-	IsTurn       bool          `json:"isTurn"`
-	CanCheck     bool          `json:"canCheck"`
-	CanCall      bool          `json:"canCall"`
-	CanBet       bool          `json:"canBet"`
-	CanRaise     bool          `json:"canRaise"`
-	CanFold      bool          `json:"canFold"`
-	CallAmount   int           `json:"callAmount"`
-	MinBet       int           `json:"minBet"`
-	MinRaise     int           `json:"minRaise"`
+	UserID       string         `json:"userId"`
+	Username     string         `json:"username"`
+	SeatIndex    int            `json:"seatIndex"`
+	Stack        int            `json:"stack"`
+	Folded       bool           `json:"folded"`
+	LastAction   string         `json:"lastAction"`
+	Won          int            `json:"won"`
+	Contributed  int            `json:"contributed"`
+	BestHandName string         `json:"bestHandName,omitempty"`
+	RevealMask   int            `json:"revealMask"`
+	CanReveal    bool           `json:"canReveal"`
+	HoleCards    []*domain.Card `json:"holeCards,omitempty"`
+	IsTurn       bool           `json:"isTurn"`
+	CanCheck     bool           `json:"canCheck"`
+	CanCall      bool           `json:"canCall"`
+	CanBet       bool           `json:"canBet"`
+	CanRaise     bool           `json:"canRaise"`
+	CanFold      bool           `json:"canFold"`
+	CallAmount   int            `json:"callAmount"`
+	MinBet       int            `json:"minBet"`
+	MinRaise     int            `json:"minRaise"`
 }
 
 func (h *GameHandler) GetState(w http.ResponseWriter, r *http.Request, s *store.Session) {
@@ -135,6 +138,8 @@ func (h *GameHandler) GetState(w http.ResponseWriter, r *http.Request, s *store.
 			Won:          p.Won,
 			Contributed:  p.Contributed,
 			BestHandName: p.BestHandName,
+			RevealMask:   p.RevealMask,
+			CanReveal:    p.UserID == s.UserID && room.Game.Stage == domain.StageFinished,
 			IsTurn:       isTurn,
 			CanCheck:     canCheck,
 			CanCall:      canCall,
@@ -145,8 +150,10 @@ func (h *GameHandler) GetState(w http.ResponseWriter, r *http.Request, s *store.
 			MinBet:       minBet,
 			MinRaise:     minRaise,
 		}
-		if p.UserID == s.UserID || room.Game.Stage == domain.StageFinished {
-			pv.HoleCards = p.HoleCards
+		if p.UserID == s.UserID {
+			pv.HoleCards = visibleHoleCards(p.HoleCards, 3)
+		} else if room.Game.Stage == domain.StageFinished {
+			pv.HoleCards = visibleHoleCards(p.HoleCards, p.RevealMask)
 		}
 		players = append(players, pv)
 	}
@@ -188,7 +195,15 @@ func (h *GameHandler) Action(w http.ResponseWriter, r *http.Request, s *store.Se
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "action type required"})
 		return
 	}
-	room, err := h.Store.ApplyAction(roomID, s.UserID, req.ActionID, req.Type, req.Amount, req.ExpectedVersion)
+	var (
+		room *store.Room
+		err  error
+	)
+	if req.Type == "reveal" {
+		room, err = h.Store.ApplyReveal(roomID, s.UserID, req.ActionID, req.RevealMask, req.ExpectedVersion)
+	} else {
+		room, err = h.Store.ApplyAction(roomID, s.UserID, req.ActionID, req.Type, req.Amount, req.ExpectedVersion)
+	}
 	if err != nil {
 		status := http.StatusBadRequest
 		if err.Error() == "version conflict" {
@@ -198,6 +213,19 @@ func (h *GameHandler) Action(w http.ResponseWriter, r *http.Request, s *store.Se
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "stateVersion": room.StateVersion})
+}
+
+func visibleHoleCards(holeCards []domain.Card, revealMask int) []*domain.Card {
+	visible := []*domain.Card{nil, nil}
+	if len(holeCards) > 0 && (revealMask&1) != 0 {
+		c := holeCards[0]
+		visible[0] = &c
+	}
+	if len(holeCards) > 1 && (revealMask&2) != 0 {
+		c := holeCards[1]
+		visible[1] = &c
+	}
+	return visible
 }
 
 func roomVersion(r *store.Room) int64 {

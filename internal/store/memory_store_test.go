@@ -7,7 +7,7 @@ func TestStore_RoomLifecycleAndVersionConflict(t *testing.T) {
 	owner := s.CreateSession("owner")
 	guest := s.CreateSession("guest")
 
-	room := s.CreateRoom(owner, "r1", 2, 10, 10)
+	room := s.CreateRoom(owner, "r1", 10, 10)
 	if _, err := s.JoinRoom(room.RoomID, guest); err != nil {
 		t.Fatal(err)
 	}
@@ -30,12 +30,89 @@ func TestStore_RoomLifecycleAndVersionConflict(t *testing.T) {
 	}
 }
 
+func TestStore_RevealAfterFinished_SucceedsAndBumpsVersion(t *testing.T) {
+	s := NewMemoryStore()
+	owner := s.CreateSession("owner")
+	guest := s.CreateSession("guest")
+
+	room := s.CreateRoom(owner, "r3", 10, 10)
+	if _, err := s.JoinRoom(room.RoomID, guest); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.StartGame(room.RoomID, owner.UserID); err != nil {
+		t.Fatal(err)
+	}
+	r, _ := s.GetRoom(room.RoomID)
+	turnUser := r.Game.Players[r.Game.TurnPos].UserID
+	if _, err := s.ApplyAction(room.RoomID, turnUser, "fold1", "fold", 0, r.StateVersion); err != nil {
+		t.Fatal(err)
+	}
+	r, _ = s.GetRoom(room.RoomID)
+	version := r.StateVersion
+	if r.Game.Stage != "finished" {
+		t.Fatalf("expected finished stage, got %s", r.Game.Stage)
+	}
+	updated, err := s.ApplyReveal(room.RoomID, owner.UserID, "reveal1", 1, version)
+	if err != nil {
+		t.Fatalf("expected reveal success, got %v", err)
+	}
+	if updated.StateVersion != version+1 {
+		t.Fatalf("expected version %d, got %d", version+1, updated.StateVersion)
+	}
+	for _, gp := range updated.Game.Players {
+		if gp.UserID == owner.UserID && gp.RevealMask != 1 {
+			t.Fatalf("expected owner reveal mask 1, got %d", gp.RevealMask)
+		}
+	}
+}
+
+func TestStore_RevealBeforeFinished_Fails(t *testing.T) {
+	s := NewMemoryStore()
+	owner := s.CreateSession("owner")
+	guest := s.CreateSession("guest")
+
+	room := s.CreateRoom(owner, "r4", 10, 10)
+	if _, err := s.JoinRoom(room.RoomID, guest); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.StartGame(room.RoomID, owner.UserID); err != nil {
+		t.Fatal(err)
+	}
+	r, _ := s.GetRoom(room.RoomID)
+	if _, err := s.ApplyReveal(room.RoomID, owner.UserID, "reveal2", 1, r.StateVersion); err == nil {
+		t.Fatalf("expected reveal before finished to fail")
+	}
+}
+
+func TestStore_RevealVersionConflict(t *testing.T) {
+	s := NewMemoryStore()
+	owner := s.CreateSession("owner")
+	guest := s.CreateSession("guest")
+
+	room := s.CreateRoom(owner, "r5", 10, 10)
+	if _, err := s.JoinRoom(room.RoomID, guest); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.StartGame(room.RoomID, owner.UserID); err != nil {
+		t.Fatal(err)
+	}
+	r, _ := s.GetRoom(room.RoomID)
+	turnUser := r.Game.Players[r.Game.TurnPos].UserID
+	if _, err := s.ApplyAction(room.RoomID, turnUser, "fold2", "fold", 0, r.StateVersion); err != nil {
+		t.Fatal(err)
+	}
+	r, _ = s.GetRoom(room.RoomID)
+	if _, err := s.ApplyReveal(room.RoomID, owner.UserID, "reveal3", 2, r.StateVersion-1); err == nil {
+		t.Fatalf("expected reveal version conflict")
+	}
+}
+
 func TestStore_LeaveRoomAndNextHand(t *testing.T) {
 	s := NewMemoryStore()
 	owner := s.CreateSession("owner")
 	guest := s.CreateSession("guest")
 
-	room := s.CreateRoom(owner, "r2", 2, 10, 10)
+	room := s.CreateRoom(owner, "r2", 10, 10)
 	if _, err := s.JoinRoom(room.RoomID, guest); err != nil {
 		t.Fatal(err)
 	}

@@ -47,6 +47,13 @@ const HAND_TEXT = {
   high_card: "高牌",
 };
 
+const REVEAL_TEXT = {
+  0: "不亮牌",
+  1: "亮第一张",
+  2: "亮第二张",
+  3: "全亮",
+};
+
 function logLine(msg) {
   const el = document.getElementById("log");
   const now = new Date().toLocaleTimeString();
@@ -91,6 +98,24 @@ function renderHandLog(data) {
 function getCurrentPlayer(data) {
   if (!data || !data.game || !Array.isArray(data.game.players)) return null;
   return data.game.players.find((p) => p.userId === currentUserId) || null;
+}
+
+function updateRevealControls(data) {
+  const controls = document.getElementById("reveal-controls");
+  const hint = document.getElementById("reveal-hint");
+  if (!controls || !hint) return;
+
+  const me = getCurrentPlayer(data);
+  const canReveal = !!(me && me.canReveal);
+
+  controls.style.display = canReveal ? "flex" : "none";
+  hint.style.display = canReveal ? "block" : "none";
+
+  controls.querySelectorAll("button[data-reveal]").forEach((btn) => {
+    const mask = Number(btn.dataset.reveal);
+    btn.disabled = !canReveal;
+    btn.classList.toggle("is-active", canReveal && mask === Number(me.revealMask || 0));
+  });
 }
 
 function updateActionButtons(data) {
@@ -249,6 +274,7 @@ function renderState(data) {
     renderWaitingPlayers(data);
     updateMyStack(data);
     updateOwnerActions(data);
+    updateRevealControls(data);
     updateActionButtons(data);
     renderHandLog(data);
     return;
@@ -317,6 +343,7 @@ function renderState(data) {
     )
     .join("");
 
+  updateRevealControls(data);
   updateMyStack(data);
   updateOwnerActions(data);
   updateActionButtons(data);
@@ -406,6 +433,24 @@ async function doAction(type) {
   }
 }
 
+async function doReveal(mask) {
+  try {
+    await api(`/api/v1/rooms/${roomId}/actions`, {
+      method: "POST",
+      body: {
+        actionId: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
+        type: "reveal",
+        revealMask: Number(mask),
+        expectedVersion: stateVersion,
+      },
+    });
+    logLine(`亮牌设置成功：${REVEAL_TEXT[Number(mask)] || Number(mask)}`);
+    await loadState();
+  } catch (err) {
+    logLine(`亮牌设置失败：${err.message}`);
+  }
+}
+
 async function startGame() {
   try {
     await api(`/api/v1/rooms/${roomId}/start`, { method: "POST", body: {} });
@@ -447,6 +492,10 @@ function resetPolling(ms) {
 
   document.querySelectorAll("button[data-action]").forEach((btn) => {
     btn.addEventListener("click", () => doAction(btn.dataset.action));
+  });
+
+  document.querySelectorAll("button[data-reveal]").forEach((btn) => {
+    btn.addEventListener("click", () => doReveal(btn.dataset.reveal));
   });
 
   document.getElementById("btn-start-game").addEventListener("click", startGame);

@@ -23,6 +23,7 @@ type GamePlayer struct {
 	SeatIndex     int
 	Stack         int
 	HoleCards     []Card
+	RevealMask    int
 	Folded        bool
 	AllIn         bool
 	Contributed   int
@@ -108,6 +109,7 @@ func NewGame(players []*GamePlayer, dealerPos int, openBetMin int, betMin int) (
 	}
 	Shuffle(gs.Deck)
 	for _, p := range gs.Players {
+		p.RevealMask = 0
 		p.Folded = false
 		p.AllIn = false
 		p.Contributed = 0
@@ -499,6 +501,22 @@ func bestPlayers(players []*GamePlayer, strength map[string]HandValue) []*GamePl
 		}
 	}
 	return winners
+}
+
+func (g *GameState) SetRevealSelection(userID string, mask int) error {
+	if g.Stage != StageFinished {
+		return errors.New("reveal only allowed after hand finished")
+	}
+	if mask < 0 || mask > 3 {
+		return errors.New("invalid reveal mask")
+	}
+	for _, p := range g.Players {
+		if p.UserID == userID {
+			p.RevealMask = mask
+			return nil
+		}
+	}
+	return errors.New("player not in game")
 }
 
 func (g *GameState) PotEligibleCap() int {

@@ -85,6 +85,60 @@ func TestGame_CallAndCheckToShowdown(t *testing.T) {
 	}
 }
 
+func TestGame_RevealMaskDefaultsToZero(t *testing.T) {
+	g, err := NewGame(newPlayers(), 0, 10, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range g.Players {
+		if p.RevealMask != 0 {
+			t.Fatalf("expected default reveal mask 0, got %d", p.RevealMask)
+		}
+	}
+}
+
+func TestGame_SetRevealSelection_OnlyWhenFinished(t *testing.T) {
+	g, err := NewGame(newPlayers(), 0, 10, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := g.SetRevealSelection("u1", 1); err == nil {
+		t.Fatalf("expected reveal before finished to fail")
+	}
+	current := g.Players[g.TurnPos].UserID
+	if err := g.ApplyAction(current, "fold", 0); err != nil {
+		t.Fatal(err)
+	}
+	if g.Stage != StageFinished {
+		t.Fatalf("expected finished stage, got %s", g.Stage)
+	}
+	if err := g.SetRevealSelection("u1", 2); err != nil {
+		t.Fatalf("expected reveal at finished to succeed, got %v", err)
+	}
+	for _, p := range g.Players {
+		if p.UserID == "u1" && p.RevealMask != 2 {
+			t.Fatalf("expected u1 reveal mask 2, got %d", p.RevealMask)
+		}
+	}
+}
+
+func TestGame_SetRevealSelection_InvalidMaskRejected(t *testing.T) {
+	g, err := NewGame(newPlayers(), 0, 10, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	current := g.Players[g.TurnPos].UserID
+	if err := g.ApplyAction(current, "fold", 0); err != nil {
+		t.Fatal(err)
+	}
+	if err := g.SetRevealSelection("u1", -1); err == nil {
+		t.Fatalf("expected negative reveal mask to fail")
+	}
+	if err := g.SetRevealSelection("u1", 4); err == nil {
+		t.Fatalf("expected reveal mask > 3 to fail")
+	}
+}
+
 func TestGame_ShowdownMainPotWithOvercall(t *testing.T) {
 	players := []*GamePlayer{
 		{UserID: "u1", Username: "A", SeatIndex: 0, Stack: 10000},

@@ -137,6 +137,11 @@ button.btn-secondary:hover:not(:disabled) {
   background: transparent;
 }
 
+.is-active {
+  border-color: var(--accent) !important;
+  color: var(--accent) !important;
+}
+
 button.btn-danger {
   background: var(--danger);
 }
