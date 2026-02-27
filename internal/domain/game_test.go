@@ -139,6 +139,70 @@ func TestGame_SetRevealSelection_InvalidMaskRejected(t *testing.T) {
 	}
 }
 
+func TestGame_SetRevealSelection_FoldedPlayerCanOverrideDefault(t *testing.T) {
+	g, err := NewGame(newPlayers(), 0, 10, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	current := g.Players[g.TurnPos].UserID
+	if err := g.ApplyAction(current, "fold", 0); err != nil {
+		t.Fatal(err)
+	}
+	if err := g.SetRevealSelection(current, 1); err != nil {
+		t.Fatalf("expected folded player reveal override to succeed, got %v", err)
+	}
+	for _, p := range g.Players {
+		if p.UserID == current && p.RevealMask != 1 {
+			t.Fatalf("expected folded player reveal mask 1, got %d", p.RevealMask)
+		}
+	}
+}
+
+func TestGame_DefaultRevealMasks_ShowdownFoldedHiddenActiveShown(t *testing.T) {
+	g, err := NewGame(newPlayers(), 0, 10, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	folded := g.Players[g.TurnPos].UserID
+	if err := g.ApplyAction(folded, "fold", 0); err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range g.Players {
+		if p.UserID == folded && p.RevealMask != 0 {
+			t.Fatalf("expected folded player default reveal mask 0, got %d", p.RevealMask)
+		}
+		if p.UserID != folded && p.RevealMask != 0 {
+			t.Fatalf("expected last-standing winner default reveal mask 0, got %d", p.RevealMask)
+		}
+	}
+}
+
+func TestGame_DefaultRevealMasks_ShowdownNonFoldedShown(t *testing.T) {
+	g, err := NewGame(newPlayers(), 0, 10, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	u1 := g.Players[g.TurnPos].UserID
+	if err := g.ApplyAction(u1, "call", 0); err != nil {
+		t.Fatalf("preflop call failed: %v", err)
+	}
+	u2 := g.Players[g.TurnPos].UserID
+	if err := g.ApplyAction(u2, "check", 0); err != nil {
+		t.Fatalf("preflop check failed: %v", err)
+	}
+	for g.Stage != StageFinished {
+		u := g.Players[g.TurnPos].UserID
+		if err := g.ApplyAction(u, "check", 0); err != nil {
+			t.Fatalf("check failed at stage=%s err=%v", g.Stage, err)
+		}
+	}
+	for _, p := range g.Players {
+		if p.RevealMask != 3 {
+			t.Fatalf("expected non-folded showdown player default reveal mask 3, got %d for %s", p.RevealMask, p.UserID)
+		}
+	}
+}
+
 func TestGame_ShowdownMainPotWithOvercall(t *testing.T) {
 	players := []*GamePlayer{
 		{UserID: "u1", Username: "A", SeatIndex: 0, Stack: 10000},

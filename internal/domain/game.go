@@ -344,6 +344,7 @@ func (g *GameState) finishByLastStanding() {
 	winner.Won = g.Pot
 	g.Result = &GameResult{Winners: []string{winner.UserID}, Reason: "others folded"}
 	g.Stage = StageFinished
+	g.applyDefaultRevealMasks()
 }
 
 func (g *GameState) finishShowdown() {
@@ -351,6 +352,7 @@ func (g *GameState) finishShowdown() {
 	if len(active) == 0 {
 		g.Stage = StageFinished
 		g.Result = &GameResult{Winners: nil, Reason: "no active players"}
+		g.applyDefaultRevealMasks()
 		return
 	}
 	type candidate struct {
@@ -442,6 +444,7 @@ func (g *GameState) finishShowdown() {
 	}
 	g.Result = &GameResult{Winners: winnerIDs, Reason: "showdown"}
 	g.Stage = StageFinished
+	g.applyDefaultRevealMasks()
 }
 
 func (g *GameState) refundUnmatchedChips() int {
@@ -510,13 +513,37 @@ func (g *GameState) SetRevealSelection(userID string, mask int) error {
 	if mask < 0 || mask > 3 {
 		return errors.New("invalid reveal mask")
 	}
+	var target *GamePlayer
 	for _, p := range g.Players {
 		if p.UserID == userID {
-			p.RevealMask = mask
-			return nil
+			target = p
+			break
 		}
 	}
-	return errors.New("player not in game")
+	if target == nil {
+		return errors.New("player not in game")
+	}
+	target.RevealMask = mask
+	return nil
+}
+
+func (g *GameState) applyDefaultRevealMasks() {
+	for _, p := range g.Players {
+		if p.Folded {
+			p.RevealMask = 0
+			continue
+		}
+		p.RevealMask = 3
+	}
+	if g.Result != nil && g.Result.Reason == "others folded" && len(g.Result.Winners) == 1 {
+		winnerID := g.Result.Winners[0]
+		for _, p := range g.Players {
+			if p.UserID == winnerID {
+				p.RevealMask = 0
+				break
+			}
+		}
+	}
 }
 
 func (g *GameState) PotEligibleCap() int {
