@@ -340,16 +340,16 @@ pre {
   left: 44px;
   top: -52px;
   max-width: 250px;
-  background: linear-gradient(145deg, rgba(30, 41, 59, .98), rgba(15, 23, 42, .98));
+  background: linear-gradient(145deg, rgba(59, 130, 246, .96), rgba(30, 64, 175, .96));
   color: #f8fafc;
-  border: 1px solid rgba(148, 163, 184, .3);
+  border: 1px solid rgba(191, 219, 254, .75);
   border-radius: 14px;
   padding: 8px 12px;
   font-size: .8rem;
   font-weight: 600;
   line-height: 1.4;
   letter-spacing: .01em;
-  box-shadow: 0 12px 24px rgba(2, 6, 23, .45);
+  box-shadow: 0 12px 24px rgba(30, 64, 175, .38);
   z-index: 3;
   white-space: normal;
   word-break: break-word;
@@ -363,23 +363,23 @@ pre {
   bottom: -8px;
   width: 13px;
   height: 13px;
-  border-right: 1px solid rgba(148, 163, 184, .3);
-  border-bottom: 1px solid rgba(148, 163, 184, .3);
-  background: linear-gradient(145deg, rgba(30, 41, 59, .98), rgba(15, 23, 42, .98));
+  border-right: 1px solid rgba(191, 219, 254, .75);
+  border-bottom: 1px solid rgba(191, 219, 254, .75);
+  background: linear-gradient(145deg, rgba(59, 130, 246, .96), rgba(30, 64, 175, .96));
   transform: rotate(45deg);
 }
 .player-bubble.is-self {
   background: linear-gradient(145deg, rgba(21, 128, 61, .95), rgba(22, 163, 74, .95));
-  border-color: rgba(134, 239, 172, .45);
-  box-shadow: 0 12px 24px rgba(21, 128, 61, .28);
+  border-color: rgba(134, 239, 172, .6);
+  color: #f0fdf4;
+  box-shadow: 0 12px 24px rgba(21, 128, 61, .3);
 }
 .player-bubble.is-self::after {
-  border-right-color: rgba(134, 239, 172, .45);
-  border-bottom-color: rgba(134, 239, 172, .45);
+  border-right-color: rgba(134, 239, 172, .6);
+  border-bottom-color: rgba(134, 239, 172, .6);
   background: linear-gradient(145deg, rgba(21, 128, 61, .95), rgba(22, 163, 74, .95));
 }
 
-.quick-chat-panel {
   border: 1px solid var(--card-border);
   border-radius: 10px;
   background: rgba(11, 17, 32, .35);

@@ -477,15 +477,26 @@ function renderQuickChatBubble(event) {
   const row = document.querySelector(`.player-row[data-user-id="${selectorEscape(event.userId)}"]`);
   if (!row) return;
 
+  const text = toQuickChatText(event.phraseId);
+  const shouldBeSelf = event.userId === currentUserId;
   const existing = row.querySelector(".player-bubble");
+  if (
+    existing &&
+    existing.dataset.phraseId === String(event.phraseId || "") &&
+    existing.textContent === text &&
+    existing.classList.contains("is-self") === shouldBeSelf
+  ) {
+    return;
+  }
   if (existing) existing.remove();
 
   const bubble = document.createElement("div");
   bubble.className = "player-bubble";
-  if (event.userId === currentUserId) {
+  bubble.dataset.phraseId = String(event.phraseId || "");
+  if (shouldBeSelf) {
     bubble.classList.add("is-self");
   }
-  bubble.textContent = toQuickChatText(event.phraseId);
+  bubble.textContent = text;
   row.appendChild(bubble);
 }
 
