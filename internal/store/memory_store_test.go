@@ -107,6 +107,109 @@ func TestStore_RevealVersionConflict(t *testing.T) {
 	}
 }
 
+func TestStore_QuickChatFlowCooldownAndDedup(t *testing.T) {
+	s := NewMemoryStore()
+	owner := s.CreateSession("owner")
+	guest := s.CreateSession("guest")
+	room := s.CreateRoom(owner, "qc", 10, 10)
+	if _, err := s.JoinRoom(room.RoomID, guest); err != nil {
+		t.Fatal(err)
+	}
+
+	r, _ := s.GetRoom(room.RoomID)
+	beforeVersion := r.StateVersion
+
+	updatedRoom, event, retryAfter, err := s.SendQuickChat(room.RoomID, owner.UserID, "qc-1", "nh")
+	if err != nil {
+		t.Fatalf("expected send quick chat success, got %v", err)
+	}
+	if event == nil || event.EventID == 0 {
+		t.Fatalf("expected event id assigned")
+	}
+	if retryAfter != 0 {
+		t.Fatalf("expected retryAfter 0, got %d", retryAfter)
+	}
+	if updatedRoom.StateVersion != beforeVersion {
+		t.Fatalf("expected quick chat not to bump state version, got %d want %d", updatedRoom.StateVersion, beforeVersion)
+	}
+
+	_, duplicate, _, err := s.SendQuickChat(room.RoomID, owner.UserID, "qc-1", "nh")
+	if err != nil {
+		t.Fatalf("expected duplicate action id to be idempotent, got %v", err)
+	}
+	if duplicate != nil {
+		t.Fatalf("expected duplicate action id not to create new event")
+	}
+
+	if _, _, retryAfter2, err := s.SendQuickChat(room.RoomID, owner.UserID, "qc-2", "gg"); err == nil {
+		t.Fatalf("expected cooldown error")
+	} else {
+		if err.Error() != "quick chat cooldown" {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if retryAfter2 <= 0 {
+			t.Fatalf("expected retryAfter > 0")
+		}
+	}
+
+	_, _, _, err = s.SendQuickChat(room.RoomID, guest.UserID, "qc-3", "gg")
+	if err != nil {
+		t.Fatalf("expected another player can send, got %v", err)
+	}
+
+	_, events, latestID, _, err := s.ListQuickChats(room.RoomID, 0)
+	if err != nil {
+		t.Fatalf("list quick chats failed: %v", err)
+	}
+	if len(events) != 2 {
+		t.Fatalf("expected 2 events, got %d", len(events))
+	}
+	if latestID < events[len(events)-1].EventID {
+		t.Fatalf("latest event id should be >= last event id")
+	}
+}
+
+func TestStore_QuickChatValidation(t *testing.T) {
+	s := NewMemoryStore()
+	owner := s.CreateSession("owner")
+	room := s.CreateRoom(owner, "qc2", 10, 10)
+
+	if _, _, _, err := s.SendQuickChat(room.RoomID, owner.UserID, "x-1", ""); err == nil {
+		t.Fatalf("expected invalid phrase error")
+	}
+	if _, _, _, err := s.SendQuickChat(room.RoomID, owner.UserID, "x-2", "free-text"); err == nil {
+		t.Fatalf("expected invalid phrase error")
+	}
+	if _, _, _, err := s.SendQuickChat(room.RoomID, "unknown-user", "x-3", "nh"); err == nil {
+		t.Fatalf("expected user not in room error")
+	}
+}
+
+func TestStore_QuickChatDoesNotCauseActionVersionConflict(t *testing.T) {
+	s := NewMemoryStore()
+	owner := s.CreateSession("owner")
+	guest := s.CreateSession("guest")
+	room := s.CreateRoom(owner, "qc3", 10, 10)
+	if _, err := s.JoinRoom(room.RoomID, guest); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.StartGame(room.RoomID, owner.UserID); err != nil {
+		t.Fatal(err)
+	}
+
+	r, _ := s.GetRoom(room.RoomID)
+	expectedVersion := r.StateVersion
+	turnUser := r.Game.Players[r.Game.TurnPos].UserID
+
+	if _, _, _, err := s.SendQuickChat(room.RoomID, owner.UserID, "qc-share-ver", "nh"); err != nil {
+		t.Fatalf("quick chat failed: %v", err)
+	}
+
+	if _, err := s.ApplyAction(room.RoomID, turnUser, "qc-action-after-chat", "call", 0, expectedVersion); err != nil {
+		t.Fatalf("expected action success with pre-chat version, got %v", err)
+	}
+}
+
 func TestStore_LeaveRoomAndNextHand(t *testing.T) {
 	s := NewMemoryStore()
 	owner := s.CreateSession("owner")

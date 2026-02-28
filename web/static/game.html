@@ -36,6 +36,16 @@
         <button data-action="bet" class="btn-warning">下注</button>
         <button data-action="raise" class="btn-warning">加注</button>
       </div>
+      <details id="quick-chat-panel" class="quick-chat-panel" style="margin-top: 12px;">
+        <summary class="quick-chat-summary">发送短句</summary>
+        <div id="quick-chat-controls" class="quick-chat-controls">
+          <select id="quick-chat-select" class="quick-chat-select" aria-label="快捷短句选择">
+            <option value="">请选择短句</option>
+          </select>
+          <button id="quick-chat-send" type="button" class="btn-secondary">发送</button>
+        </div>
+        <p id="quick-chat-feedback" class="quick-chat-feedback" aria-live="polite"></p>
+      </details>
       <div id="reveal-controls" class="actions" style="margin-top: 10px; display:none;">
         <button data-reveal="0" class="btn-secondary">不亮牌</button>
         <button data-reveal="1" class="btn-secondary">亮第一张</button>

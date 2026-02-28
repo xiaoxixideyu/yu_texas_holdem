@@ -53,6 +53,16 @@ func main() {
 			gameH.GetState(w, r, s)
 		case "actions":
 			gameH.Action(w, r, s)
+		case "quick-chats":
+			if r.Method == http.MethodGet {
+				gameH.GetQuickChats(w, r, s)
+				return
+			}
+			if r.Method == http.MethodPost {
+				gameH.QuickChat(w, r, s)
+				return
+			}
+			w.WriteHeader(http.StatusMethodNotAllowed)
 		default:
 			http.NotFound(w, r)
 		}

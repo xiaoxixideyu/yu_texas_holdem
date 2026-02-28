@@ -21,6 +21,11 @@ type actionReq struct {
 	ExpectedVersion int64  `json:"expectedVersion"`
 }
 
+type quickChatReq struct {
+	ActionID string `json:"actionId"`
+	PhraseID string `json:"phraseId"`
+}
+
 type gamePlayerView struct {
 	UserID       string         `json:"userId"`
 	Username     string         `json:"username"`
@@ -43,6 +48,99 @@ type gamePlayerView struct {
 	CallAmount   int            `json:"callAmount"`
 	MinBet       int            `json:"minBet"`
 	MinRaise     int            `json:"minRaise"`
+}
+
+func (h *GameHandler) GetQuickChats(w http.ResponseWriter, r *http.Request, s *store.Session) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	roomID := roomIDFromPath(r.URL.Path)
+	if roomID == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid room id"})
+		return
+	}
+	room, ok := h.Store.GetRoom(roomID)
+	if !ok {
+		writeJSON(w, http.StatusNotFound, map[string]any{"error": "room not found"})
+		return
+	}
+	inRoom := false
+	for _, p := range room.Players {
+		if p.UserID == s.UserID {
+			inRoom = true
+			break
+		}
+	}
+	if !inRoom {
+		writeJSON(w, http.StatusForbidden, map[string]any{"error": "user not in room"})
+		return
+	}
+
+	sinceEventID := int64(0)
+	if sv := r.URL.Query().Get("sinceEventId"); sv != "" {
+		if v, err := strconv.ParseInt(sv, 10, 64); err == nil && v > 0 {
+			sinceEventID = v
+		}
+	}
+
+	_, events, latestEventID, serverNowMs, err := h.Store.ListQuickChats(roomID, sinceEventID)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+		return
+	}
+	bubbleTTL, cooldown, retention := h.Store.QuickChatConfig()
+	writeJSON(w, http.StatusOK, map[string]any{
+		"events":        events,
+		"latestEventId": latestEventID,
+		"serverNowMs":   serverNowMs,
+		"bubbleTtlMs":   bubbleTTL,
+		"cooldownMs":    cooldown,
+		"retentionMs":   retention,
+		"phrases":       h.Store.QuickChatPhrases(),
+	})
+}
+
+func (h *GameHandler) QuickChat(w http.ResponseWriter, r *http.Request, s *store.Session) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	roomID := roomIDFromPath(r.URL.Path)
+	if roomID == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid room id"})
+		return
+	}
+	var req quickChatReq
+	if err := readJSON(r, &req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid json"})
+		return
+	}
+	_, event, retryAfterMs, err := h.Store.SendQuickChat(roomID, s.UserID, req.ActionID, req.PhraseID)
+	if err != nil {
+		status := http.StatusBadRequest
+		body := map[string]any{"error": err.Error()}
+		if err.Error() == "quick chat cooldown" {
+			status = http.StatusTooManyRequests
+			body["retryAfterMs"] = retryAfterMs
+		}
+		if err.Error() == "user not in room" {
+			status = http.StatusForbidden
+		}
+		writeJSON(w, status, body)
+		return
+	}
+	if event == nil {
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "duplicate": true})
+		return
+	}
+	_, cooldown, _ := h.Store.QuickChatConfig()
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok":          true,
+		"chatEventId": event.EventID,
+		"expireAtMs":  event.ExpireAtMs,
+		"cooldownMs":  cooldown,
+	})
 }
 
 func (h *GameHandler) GetState(w http.ResponseWriter, r *http.Request, s *store.Session) {

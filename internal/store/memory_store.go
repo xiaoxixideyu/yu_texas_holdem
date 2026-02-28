@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -25,6 +26,76 @@ const (
 	RoomPlaying RoomStatus = "playing"
 )
 
+const (
+	QuickChatBubbleTTLMS int64 = 5000
+	QuickChatCooldownMS  int64 = 6000
+	QuickChatRetentionMS int64 = 7000
+)
+
+type QuickChatEvent struct {
+	EventID     int64  `json:"eventId"`
+	UserID      string `json:"userId"`
+	Username    string `json:"username"`
+	PhraseID    string `json:"phraseId"`
+	CreatedAtMs int64  `json:"createdAtMs"`
+	ExpireAtMs  int64  `json:"expireAtMs"`
+}
+
+var quickChatPhraseList = []string{
+	"wait_flowers",
+	"solve_universe",
+	"tea_refill",
+	"countdown",
+	"thinker_mode",
+	"dawn_table",
+	"cappuccino",
+	"showtime",
+	"you_act_i_act",
+	"something_here",
+	"mind_game",
+	"script_seen",
+	"allin_warning",
+	"just_this",
+	"easy_sigh",
+	"fold_now",
+	"you_call_i_show",
+	"take_the_shot",
+	"pressure_on",
+	"tilt_alert",
+	"nh",
+	"gg",
+	"luck_is_skill",
+	"next_real",
+}
+
+var quickChatPhrases = map[string]struct{}{
+	"wait_flowers":   {},
+	"solve_universe": {},
+	"tea_refill":     {},
+	"countdown":      {},
+	"thinker_mode":   {},
+	"dawn_table":     {},
+	"cappuccino":     {},
+	"showtime":       {},
+	"you_act_i_act":  {},
+	"something_here": {},
+	"mind_game":      {},
+	"script_seen":    {},
+	"allin_warning":  {},
+	"just_this":      {},
+	"easy_sigh":      {},
+	"fold_now":       {},
+	"you_call_i_show": {},
+	"take_the_shot":  {},
+	"pressure_on":    {},
+	"tilt_alert":     {},
+	"nh":             {},
+	"gg":             {},
+	"luck_is_skill":  {},
+	"next_real":      {},
+}
+
+
 type RoomPlayer struct {
 	UserID   string `json:"userId"`
 	Username string `json:"username"`
@@ -33,18 +104,28 @@ type RoomPlayer struct {
 }
 
 type Room struct {
-	RoomID        string       `json:"roomId"`
-	Name          string       `json:"name"`
-	OpenBetMin    int          `json:"openBetMin"`
-	BetMin        int          `json:"betMin"`
-	OwnerUserID   string       `json:"ownerUserId"`
-	Status        RoomStatus   `json:"status"`
-	Players       []RoomPlayer `json:"players"`
-	StateVersion  int64        `json:"stateVersion"`
-	UpdatedAtUnix int64        `json:"updatedAtUnix"`
-	NextDealerPos int          `json:"-"`
-	Game          *domain.GameState
-	ActionSeen    map[string]bool
+	RoomID               string       `json:"roomId"`
+	Name                 string       `json:"name"`
+	OpenBetMin           int          `json:"openBetMin"`
+	BetMin               int          `json:"betMin"`
+	OwnerUserID          string       `json:"ownerUserId"`
+	Status               RoomStatus   `json:"status"`
+	Players              []RoomPlayer `json:"players"`
+	StateVersion         int64        `json:"stateVersion"`
+	UpdatedAtUnix        int64        `json:"updatedAtUnix"`
+	NextDealerPos        int          `json:"-"`
+	Game                 *domain.GameState
+	ActionSeen           map[string]bool
+	QuickChats           []QuickChatEvent
+	QuickChatSeen        map[string]bool
+	QuickChatSeenOrder   []quickChatSeenKey
+	QuickChatLastSentAt  map[string]int64
+	QuickChatNextEventID int64
+}
+
+type quickChatSeenKey struct {
+	ActionID    string
+	CreatedAtMs int64
 }
 
 type MemoryStore struct {
@@ -116,19 +197,25 @@ func (m *MemoryStore) ListRooms() ([]Room, int64) {
 func (m *MemoryStore) CreateRoom(owner *Session, name string, openBetMin int, betMin int) *Room {
 	rid := atomic.AddInt64(&m.nextRoom, 1)
 	r := &Room{
-		RoomID:        fmt.Sprintf("r-%d", rid),
-		Name:          name,
-		OpenBetMin:    openBetMin,
-		BetMin:        betMin,
-		OwnerUserID:   owner.UserID,
-		Status:        RoomWaiting,
-		Players:       []RoomPlayer{{UserID: owner.UserID, Username: owner.Username, Seat: 0, Stack: 10000}},
-		StateVersion:  1,
-		UpdatedAtUnix: time.Now().Unix(),
-		NextDealerPos: 0,
-		Game:          nil,
-		ActionSeen:    map[string]bool{},
+		RoomID:               fmt.Sprintf("r-%d", rid),
+		Name:                 name,
+		OpenBetMin:           openBetMin,
+		BetMin:               betMin,
+		OwnerUserID:          owner.UserID,
+		Status:               RoomWaiting,
+		Players:              []RoomPlayer{{UserID: owner.UserID, Username: owner.Username, Seat: 0, Stack: 10000}},
+		StateVersion:         1,
+		UpdatedAtUnix:        time.Now().Unix(),
+		NextDealerPos:        0,
+		Game:                 nil,
+		ActionSeen:           map[string]bool{},
+		QuickChats:           []QuickChatEvent{},
+		QuickChatSeen:        map[string]bool{},
+		QuickChatSeenOrder:   []quickChatSeenKey{},
+		QuickChatLastSentAt:  map[string]int64{},
+		QuickChatNextEventID: 0,
 	}
+
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.rooms[r.RoomID] = r
@@ -398,6 +485,139 @@ func (m *MemoryStore) ApplyReveal(roomID, userID, actionID string, mask int, exp
 	r.UpdatedAtUnix = time.Now().Unix()
 	m.roomsVersion++
 	return r, nil
+}
+
+func normalizePhraseID(phraseID string) string {
+	return strings.TrimSpace(strings.ToLower(phraseID))
+}
+
+func isQuickChatPhraseAllowed(phraseID string) bool {
+	_, ok := quickChatPhrases[phraseID]
+	return ok
+}
+
+func (m *MemoryStore) userInRoom(r *Room, userID string) (RoomPlayer, bool) {
+	for _, p := range r.Players {
+		if p.UserID == userID {
+			return p, true
+		}
+	}
+	return RoomPlayer{}, false
+}
+
+func cleanupQuickChats(room *Room, nowMs int64) {
+	minAlive := nowMs - QuickChatRetentionMS
+	filtered := make([]QuickChatEvent, 0, len(room.QuickChats))
+	for _, ev := range room.QuickChats {
+		if ev.CreatedAtMs >= minAlive {
+			filtered = append(filtered, ev)
+		}
+	}
+	room.QuickChats = filtered
+
+	if len(room.QuickChatSeenOrder) == 0 {
+		return
+	}
+	retained := room.QuickChatSeenOrder[:0]
+	for _, item := range room.QuickChatSeenOrder {
+		if item.CreatedAtMs >= minAlive {
+			retained = append(retained, item)
+			continue
+		}
+		delete(room.QuickChatSeen, item.ActionID)
+	}
+	room.QuickChatSeenOrder = retained
+}
+
+func (m *MemoryStore) SendQuickChat(roomID, userID, actionID, phraseID string) (*Room, *QuickChatEvent, int64, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	r, ok := m.rooms[roomID]
+	if !ok {
+		return nil, nil, 0, errors.New("room not found")
+	}
+	roomPlayer, ok := m.userInRoom(r, userID)
+	if !ok {
+		return nil, nil, 0, errors.New("user not in room")
+	}
+
+	nowMs := time.Now().UnixMilli()
+	cleanupQuickChats(r, nowMs)
+
+	normalizedActionID := strings.TrimSpace(actionID)
+	if normalizedActionID != "" && r.QuickChatSeen[normalizedActionID] {
+		return r, nil, 0, nil
+	}
+
+	normalizedPhrase := normalizePhraseID(phraseID)
+	if !isQuickChatPhraseAllowed(normalizedPhrase) {
+		return nil, nil, 0, errors.New("invalid phrase")
+	}
+
+	lastSent := r.QuickChatLastSentAt[userID]
+	if lastSent > 0 {
+		delta := nowMs - lastSent
+		if delta < QuickChatCooldownMS {
+			return nil, nil, QuickChatCooldownMS - delta, errors.New("quick chat cooldown")
+		}
+	}
+
+	r.QuickChatNextEventID++
+	event := QuickChatEvent{
+		EventID:     r.QuickChatNextEventID,
+		UserID:      userID,
+		Username:    roomPlayer.Username,
+		PhraseID:    normalizedPhrase,
+		CreatedAtMs: nowMs,
+		ExpireAtMs:  nowMs + QuickChatBubbleTTLMS,
+	}
+	r.QuickChats = append(r.QuickChats, event)
+	r.QuickChatLastSentAt[userID] = nowMs
+	if normalizedActionID != "" {
+		r.QuickChatSeen[normalizedActionID] = true
+		r.QuickChatSeenOrder = append(r.QuickChatSeenOrder, quickChatSeenKey{ActionID: normalizedActionID, CreatedAtMs: nowMs})
+	}
+	r.UpdatedAtUnix = time.Now().Unix()
+	m.roomsVersion++
+
+	return r, &event, 0, nil
+}
+
+func (m *MemoryStore) QuickChatPhrases() []string {
+	phrases := make([]string, len(quickChatPhraseList))
+	copy(phrases, quickChatPhraseList)
+	return phrases
+}
+
+func (m *MemoryStore) QuickChatConfig() (int64, int64, int64) {
+	return QuickChatBubbleTTLMS, QuickChatCooldownMS, QuickChatRetentionMS
+}
+
+func (m *MemoryStore) ListQuickChats(roomID string, sinceEventID int64) (*Room, []QuickChatEvent, int64, int64, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	r, ok := m.rooms[roomID]
+	if !ok {
+		return nil, nil, 0, 0, errors.New("room not found")
+	}
+
+	nowMs := time.Now().UnixMilli()
+	cleanupQuickChats(r, nowMs)
+
+	result := make([]QuickChatEvent, 0, len(r.QuickChats))
+	latestEventID := int64(0)
+	for _, ev := range r.QuickChats {
+		if ev.EventID > latestEventID {
+			latestEventID = ev.EventID
+		}
+		if ev.EventID > sinceEventID {
+			result = append(result, ev)
+		}
+	}
+
+	return r, result, latestEventID, nowMs, nil
 }
 
 func (m *MemoryStore) TouchUser(userID string) {

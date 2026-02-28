@@ -59,7 +59,10 @@ async function api(path, opts = {}) {
   });
   const data = await resp.json().catch(() => ({}));
   if (!resp.ok) {
-    throw new Error(data.error || `HTTP ${resp.status}`);
+    const err = new Error(data.error || `HTTP ${resp.status}`);
+    err.status = resp.status;
+    err.data = data;
+    throw err;
   }
   return data;
 }

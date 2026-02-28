@@ -7,6 +7,14 @@ if (!roomId) {
 
 let stateVersion = 0;
 let pollTimer = null;
+let quickChatPollTimer = null;
+let quickChatLastEventId = 0;
+let quickChatCooldownMs = 6000;
+let localQuickChatEventId = 0;
+
+const shownQuickChatEventIds = new Set();
+const bubbleTimersByUser = new Map();
+const activeQuickChatByUser = new Map();
 
 const ACTION_TEXT = {
   check: "过牌",
@@ -54,6 +62,52 @@ const REVEAL_TEXT = {
   3: "全亮",
 };
 
+const QUICK_CHAT_TEXT = {
+  wait_flowers: "快点吧，我等到花都谢了",
+  solve_universe: "你这手在算宇宙最优解吗",
+  tea_refill: "我茶都续第三杯了",
+  countdown: "倒计时了兄弟，手别抖",
+  thinker_mode: "这把是“思考者”模式吗",
+  dawn_table: "再想下去牌桌都天亮了",
+  cappuccino: "给阿姨倒一杯卡布奇诺",
+  showtime: "这波节目效果拉满",
+  you_act_i_act: "你演我也演，大家都别闲",
+  something_here: "这手牌有点东西",
+  mind_game: "主打一个心理战",
+  script_seen: "这把剧本我看过",
+  allin_warning: "别逼我，我要梭哈了",
+  just_this: "就这？",
+  easy_sigh: "唉，easy",
+  fold_now: "别跟了，弃牌吧",
+  you_call_i_show: "你敢跟，我就敢开",
+  take_the_shot: "这枪你接不接",
+  pressure_on: "我先给压力，你随意",
+  tilt_alert: "你这波有点上头啊",
+  nh: "打得漂亮",
+  gg: "好局好局",
+  luck_is_skill: "运气也是实力的一部分",
+  next_real: "下把见真章",
+};
+
+const QUICK_CHAT_GROUPS = [
+  {
+    label: "催节奏",
+    ids: ["wait_flowers", "solve_universe", "tea_refill", "countdown", "thinker_mode", "dawn_table"],
+  },
+  {
+    label: "整活梗",
+    ids: ["cappuccino", "showtime", "you_act_i_act", "something_here", "mind_game", "script_seen"],
+  },
+  {
+    label: "挑衅压迫",
+    ids: ["allin_warning", "just_this", "easy_sigh", "fold_now", "you_call_i_show", "take_the_shot", "pressure_on", "tilt_alert"],
+  },
+  {
+    label: "互动收尾",
+    ids: ["nh", "gg", "luck_is_skill", "next_real"],
+  },
+];
+
 function logLine(msg) {
   const el = document.getElementById("log");
   const now = new Date().toLocaleTimeString();
@@ -74,6 +128,10 @@ function toReasonText(reason) {
 
 function toHandText(name) {
   return HAND_TEXT[name] || name || "-";
+}
+
+function toQuickChatText(phraseId) {
+  return QUICK_CHAT_TEXT[phraseId] || phraseId || "";
 }
 
 function renderHandLog(data) {
@@ -238,6 +296,18 @@ function updateMyStack(data) {
   el.textContent = `筹码：${stack === null ? "-" : stack}`;
 }
 
+function attrEscape(value) {
+  return String(value || "")
+    .replace(/&/g, "&amp;")
+    .replace(/"/g, "&quot;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
+}
+
+function selectorEscape(value) {
+  return String(value || "").replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+}
+
 function renderWaitingPlayers(data) {
   const players = data.roomPlayers || [];
   if (!players.length) {
@@ -248,7 +318,7 @@ function renderWaitingPlayers(data) {
   document.getElementById("players").innerHTML = players
     .map(
       (p) => `
-      <div class="player-row">
+      <div class="player-row" data-user-id="${attrEscape(p.userId)}">
         <div class="player-avatar">${(p.username || "?")[0]}</div>
         <div class="player-info">
           <div class="player-name">
@@ -272,6 +342,7 @@ function renderState(data) {
         <div><span class="meta-label">状态</span><div class="meta-value">等待开局</div></div>
       </div>`;
     renderWaitingPlayers(data);
+    renderActiveQuickChatBubbles();
     updateMyStack(data);
     updateOwnerActions(data);
     updateRevealControls(data);
@@ -283,7 +354,7 @@ function renderState(data) {
   const g = data.game;
   const stageClass = g.stage === "finished" ? " finished" : "";
   const communityHtml = (g.communityCards || []).length
-    ? (g.communityCards || []).map(c => cardHtml(c)).join("")
+    ? (g.communityCards || []).map((c) => cardHtml(c)).join("")
     : '<span class="hint">等待发牌</span>';
 
   let resultHtml = "";
@@ -309,29 +380,28 @@ function renderState(data) {
   `;
 
   document.getElementById("players").innerHTML = (g.players || [])
-    .map(
-      (p, idx) => {
-        const isTurn = p.isTurn;
-        const isFolded = p.folded;
-        let rowClass = "player-row";
-        if (isTurn) rowClass += " is-turn";
-        if (isFolded) rowClass += " is-folded";
+    .map((p, idx) => {
+      const isTurn = p.isTurn;
+      const isFolded = p.folded;
+      let rowClass = "player-row";
+      if (isTurn) rowClass += " is-turn";
+      if (isFolded) rowClass += " is-folded";
 
-        const badges = [];
-        if (idx === g.dealerPos) badges.push('<span class="badge badge-dealer">D</span>');
-        if (idx === g.smallBlindPos) badges.push('<span class="badge badge-sb">SB</span>');
-        if (idx === g.bigBlindPos) badges.push('<span class="badge badge-bb">BB</span>');
-        if (isTurn) badges.push('<span class="badge badge-turn">行动中</span>');
-        if (isFolded) badges.push('<span class="badge badge-folded">已弃牌</span>');
+      const badges = [];
+      if (idx === g.dealerPos) badges.push('<span class="badge badge-dealer">D</span>');
+      if (idx === g.smallBlindPos) badges.push('<span class="badge badge-sb">SB</span>');
+      if (idx === g.bigBlindPos) badges.push('<span class="badge badge-bb">BB</span>');
+      if (isTurn) badges.push('<span class="badge badge-turn">行动中</span>');
+      if (isFolded) badges.push('<span class="badge badge-folded">已弃牌</span>');
 
-        const holeCardsHtml = (p.holeCards || []).length
-          ? p.holeCards.map(c => cardHtml(c)).join("")
-          : '<span class="poker-card hidden-card"></span><span class="poker-card hidden-card"></span>';
+      const holeCardsHtml = (p.holeCards || []).length
+        ? p.holeCards.map((c) => cardHtml(c)).join("")
+        : '<span class="poker-card hidden-card"></span><span class="poker-card hidden-card"></span>';
 
-        const bestHand = p.bestHandName ? `<span class="hint"> · ${toHandText(p.bestHandName)}</span>` : "";
+      const bestHand = p.bestHandName ? `<span class="hint"> · ${toHandText(p.bestHandName)}</span>` : "";
 
-        return `
-        <div class="${rowClass}">
+      return `
+        <div class="${rowClass}" data-user-id="${attrEscape(p.userId)}">
           <div class="player-avatar">${(p.username || "?")[0]}</div>
           <div class="player-info">
             <div class="player-name">${p.username} ${badges.join(" ")}</div>
@@ -339,10 +409,10 @@ function renderState(data) {
           </div>
           <div class="player-cards">${holeCardsHtml}</div>
         </div>`;
-      }
-    )
+    })
     .join("");
 
+  renderActiveQuickChatBubbles();
   updateRevealControls(data);
   updateMyStack(data);
   updateOwnerActions(data);
@@ -381,6 +451,232 @@ function cardHtml(c) {
   return `<span class="poker-card${isRed ? " red" : ""}">${rankText}${suitText}</span>`;
 }
 
+function removeUserBubble(userId) {
+  const selector = `.player-row[data-user-id="${selectorEscape(userId)}"] .player-bubble`;
+  const bubble = document.querySelector(selector);
+  if (bubble) bubble.remove();
+}
+
+function clearBubbleTimer(userId) {
+  const timer = bubbleTimersByUser.get(userId);
+  if (timer) {
+    clearTimeout(timer);
+    bubbleTimersByUser.delete(userId);
+  }
+}
+
+function hideQuickChat(userId, eventId) {
+  const active = activeQuickChatByUser.get(userId);
+  if (!active || Number(active.eventId) !== Number(eventId)) return;
+  activeQuickChatByUser.delete(userId);
+  clearBubbleTimer(userId);
+  removeUserBubble(userId);
+}
+
+function renderQuickChatBubble(event) {
+  const row = document.querySelector(`.player-row[data-user-id="${selectorEscape(event.userId)}"]`);
+  if (!row) return;
+
+  const existing = row.querySelector(".player-bubble");
+  if (existing) existing.remove();
+
+  const bubble = document.createElement("div");
+  bubble.className = "player-bubble";
+  if (event.userId === currentUserId) {
+    bubble.classList.add("is-self");
+  }
+  bubble.textContent = toQuickChatText(event.phraseId);
+  row.appendChild(bubble);
+}
+
+function scheduleQuickChatHide(event, serverNowMs) {
+  clearBubbleTimer(event.userId);
+  const ttl = Math.max(1, Number(event.expireAtMs || 0) - Number(serverNowMs || Date.now()));
+  const timer = setTimeout(() => hideQuickChat(event.userId, event.eventId), ttl);
+  bubbleTimersByUser.set(event.userId, timer);
+}
+
+function applyQuickChatEvent(event, serverNowMs) {
+  if (!event || !event.userId || !event.eventId) return;
+  if (shownQuickChatEventIds.has(event.eventId)) return;
+
+  shownQuickChatEventIds.add(event.eventId);
+  activeQuickChatByUser.set(event.userId, event);
+  renderQuickChatBubble(event);
+  scheduleQuickChatHide(event, serverNowMs);
+}
+
+function renderActiveQuickChatBubbles() {
+  const now = Date.now();
+  activeQuickChatByUser.forEach((event, userId) => {
+    if (Number(event.expireAtMs || 0) <= now) {
+      hideQuickChat(userId, event.eventId);
+      return;
+    }
+    renderQuickChatBubble(event);
+  });
+}
+
+function trimSeenQuickChatEvents() {
+  if (shownQuickChatEventIds.size <= 1000) return;
+  shownQuickChatEventIds.clear();
+}
+
+function clearAllQuickChatState() {
+  if (quickChatPollTimer) {
+    clearInterval(quickChatPollTimer);
+    quickChatPollTimer = null;
+  }
+  bubbleTimersByUser.forEach((timer) => clearTimeout(timer));
+  bubbleTimersByUser.clear();
+  shownQuickChatEventIds.clear();
+  activeQuickChatByUser.clear();
+}
+
+function resetQuickChatPolling() {
+  if (quickChatPollTimer) clearInterval(quickChatPollTimer);
+  quickChatPollTimer = setInterval(loadQuickChats, 1000);
+}
+
+function setQuickChatFeedback(text, isError = false) {
+  const feedback = document.getElementById("quick-chat-feedback");
+  if (!feedback) return;
+  if (!text) {
+    feedback.textContent = "";
+    feedback.classList.remove("is-error");
+    return;
+  }
+  feedback.textContent = text;
+  feedback.classList.toggle("is-error", !!isError);
+}
+
+function renderQuickChatButtons(phrases) {
+  const select = document.getElementById("quick-chat-select");
+  const sendBtn = document.getElementById("quick-chat-send");
+  if (!select || !sendBtn) return;
+
+  const source = Array.isArray(phrases) && phrases.length ? phrases : Object.keys(QUICK_CHAT_TEXT);
+  const available = new Set(source);
+
+  const optionHtml = QUICK_CHAT_GROUPS.map((group) => {
+    const ids = group.ids.filter((id) => available.has(id));
+    if (!ids.length) return "";
+    ids.forEach((id) => available.delete(id));
+    const options = ids
+      .map((id) => `<option value="${attrEscape(id)}">${toQuickChatText(id)}</option>`)
+      .join("");
+    return `<optgroup label="${attrEscape(group.label)}">${options}</optgroup>`;
+  })
+    .filter(Boolean)
+    .join("");
+
+  const leftover = Array.from(available);
+  const leftoverHtml = leftover.length
+    ? `<optgroup label="${attrEscape("其他")}">${leftover
+        .map((id) => `<option value="${attrEscape(id)}">${toQuickChatText(id)}</option>`)
+        .join("")}</optgroup>`
+    : "";
+
+  select.innerHTML = ['<option value="">请选择短句</option>', optionHtml, leftoverHtml].join("");
+
+  sendBtn.onclick = () => sendQuickChat(select.value || "");
+  select.onchange = () => {
+    setQuickChatFeedback("");
+  };
+}
+
+function createLocalQuickChatEvent(phraseId) {
+  localQuickChatEventId -= 1;
+  const now = Date.now();
+  return {
+    eventId: localQuickChatEventId,
+    userId: currentUserId,
+    phraseId,
+    expireAtMs: now + 3500,
+  };
+}
+
+async function loadQuickChats() {
+  try {
+    const data = await api(`/api/v1/rooms/${roomId}/quick-chats?sinceEventId=${quickChatLastEventId}`);
+    if (typeof data.cooldownMs === "number" && data.cooldownMs > 0) {
+      quickChatCooldownMs = data.cooldownMs;
+    }
+
+    const latest = Number(data.latestEventId || 0);
+    if (latest > quickChatLastEventId) {
+      quickChatLastEventId = latest;
+    }
+
+    const events = Array.isArray(data.events) ? data.events.slice() : [];
+    events.sort((a, b) => Number(a.eventId || 0) - Number(b.eventId || 0));
+    const serverNowMs = Number(data.serverNowMs || Date.now());
+
+    events.forEach((event) => applyQuickChatEvent(event, serverNowMs));
+    trimSeenQuickChatEvents();
+  } catch (err) {
+    console.error(err);
+  }
+}
+
+async function sendQuickChat(phraseId) {
+  if (!phraseId) {
+    setQuickChatFeedback("请先选择短句", true);
+    return;
+  }
+  try {
+    await api(`/api/v1/rooms/${roomId}/quick-chats`, {
+      method: "POST",
+      body: {
+        actionId: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
+        phraseId,
+      },
+    });
+    applyQuickChatEvent(createLocalQuickChatEvent(phraseId), Date.now());
+    setQuickChatFeedback("");
+
+    const select = document.getElementById("quick-chat-select");
+    if (select) select.value = "";
+
+    const panel = document.getElementById("quick-chat-panel");
+    if (panel && panel.open) panel.open = false;
+
+    await loadQuickChats();
+  } catch (err) {
+    if (String(err.message || "").includes("quick chat cooldown")) {
+      const retryAfterMs = Number(err && err.data && err.data.retryAfterMs);
+      const hintMs = Number.isFinite(retryAfterMs) && retryAfterMs > 0 ? retryAfterMs : quickChatCooldownMs;
+      setQuickChatFeedback(`发送过快，请约 ${Math.ceil(hintMs / 1000)} 秒后再试`, true);
+      return;
+    }
+    setQuickChatFeedback(`短句发送失败：${err.message}`, true);
+  }
+}
+
+async function initQuickChatConfig() {
+  try {
+    const data = await api(`/api/v1/rooms/${roomId}/quick-chats?sinceEventId=0`);
+    renderQuickChatButtons(data.phrases || []);
+
+    if (typeof data.cooldownMs === "number" && data.cooldownMs > 0) {
+      quickChatCooldownMs = data.cooldownMs;
+    }
+
+    const latest = Number(data.latestEventId || 0);
+    if (latest > quickChatLastEventId) {
+      quickChatLastEventId = latest;
+    }
+
+    const events = Array.isArray(data.events) ? data.events.slice() : [];
+    events.sort((a, b) => Number(a.eventId || 0) - Number(b.eventId || 0));
+    const serverNowMs = Number(data.serverNowMs || Date.now());
+    events.forEach((event) => applyQuickChatEvent(event, serverNowMs));
+  } catch (err) {
+    renderQuickChatButtons([]);
+    setQuickChatFeedback(`短句初始化失败：${err.message}`, true);
+  }
+}
+
 async function loadState() {
   try {
     const data = await api(`/api/v1/rooms/${roomId}/state?sinceVersion=${stateVersion}`);
@@ -414,7 +710,7 @@ async function doAction(type) {
       const input = document.getElementById("bet-amount");
       const amount = Number(input ? input.value : 0);
       if (!amount || amount <= 0) {
-        logLine(`请输入下注金额`);
+        logLine("请输入下注金额");
         return;
       }
       body.amount = amount;
@@ -473,6 +769,8 @@ async function nextHand() {
 
 async function leaveRoom() {
   try {
+    if (pollTimer) clearInterval(pollTimer);
+    clearAllQuickChatState();
     await api(`/api/v1/rooms/${roomId}/leave`, { method: "POST", body: {} });
     location.href = "/rooms.html";
   } catch (err) {
@@ -504,8 +802,14 @@ function resetPolling(ms) {
   document.getElementById("btn-start-game").style.display = "none";
   document.getElementById("btn-next-hand").style.display = "none";
 
+  await initQuickChatConfig();
+  resetQuickChatPolling();
   resetPolling(1200);
-  loadState();
+  await loadState();
+  await loadQuickChats();
+
+  window.addEventListener("beforeunload", () => {
+    if (pollTimer) clearInterval(pollTimer);
+    clearAllQuickChatState();
+  });
 })();
-
-
