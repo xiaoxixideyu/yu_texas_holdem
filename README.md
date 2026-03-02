@@ -4,6 +4,7 @@
 - 不使用数据库，所有状态在内存中
 - 前端为静态页面
 - 客户端通过轮询获取房间与游戏状态
+- 支持配置化 AI 玩家（可多 AI）
 
 ## 启动
 
@@ -16,6 +17,29 @@ go run ./cmd/server
 - `http://localhost:8080/rooms.html`（房间页）
 - `http://localhost:8080/game.html?roomId=r-1`（游戏页）
 
+## AI 配置
+
+通过环境变量启用 AI（缺失关键配置时自动降级 noop，不影响真人玩法）：
+
+- `AI_BASE_URL`：AI 网关地址（如 `https://api.openai.com/v1`）
+- `AI_API_KEY`：API key
+- `AI_MODEL`：模型名（如 `gpt-4o-mini`）
+- `AI_API_FORMAT`：`chat_completions` 或 `responses`
+- `AI_TIMEOUT_MS`：请求超时毫秒（默认 8000）
+- `AI_MAX_RETRY`：请求重试次数（默认 2）
+
+示例：
+
+```bash
+export AI_BASE_URL="https://api.openai.com/v1"
+export AI_API_KEY="<your_key>"
+export AI_MODEL="gpt-4o-mini"
+export AI_API_FORMAT="chat_completions"
+export AI_TIMEOUT_MS="8000"
+export AI_MAX_RETRY="2"
+go run ./cmd/server
+```
+
 ## 页面与轮询
 
 1. 用户名页：创建会话
@@ -23,6 +47,20 @@ go run ./cmd/server
 3. 游戏页：
    - 自己回合约 700ms 轮询
    - 非自己回合约 1200ms 轮询
+   - 房间不存在（404）时自动停止轮询并返回大厅
+
+## AI 行为说明
+
+- 房主可在 `waiting` 状态下添加/删除多个 AI 玩家
+- AI 与真人一样走 `ApplyAction` 版本链路（`expectedVersion/stateVersion`）
+- AI 的 LLM 调用在锁外执行，锁内仅快照/校验/提交
+- AI 回合自动行动；模型输出非法时按兜底策略 `check > call > fold`
+- 每手结束（正常结束 + leave 强制结束）写入 AI 复盘与对手画像
+- `state` 中可见：
+  - `roomPlayers[].isAi`
+  - `game.players[].isAi`
+  - `aiMemory`
+- 当房间无真人玩家时自动删房（即使仍有 AI）
 
 ## 鉴权
 
@@ -74,11 +112,10 @@ go run ./cmd/server
     {
       "roomId": "r-1",
       "name": "room-a",
-      "maxPlayers": 4,
       "ownerUserId": "u-1",
       "status": "waiting",
       "players": [
-        {"userId":"u-1","username":"alice","seat":0}
+        {"userId":"u-1","username":"alice","seat":0,"stack":10000,"isAi":false}
       ],
       "stateVersion": 1,
       "updatedAtUnix": 1771450000
@@ -104,7 +141,8 @@ go run ./cmd/server
 ```json
 {
   "name": "room-a",
-  "maxPlayers": 4
+  "openBetMin": 10,
+  "betMin": 10
 }
 ```
 
@@ -121,7 +159,7 @@ go run ./cmd/server
 
 响应：返回房间对象。
 
-### 6) 离开房间（新增）
+### 6) 离开房间
 
 `POST /api/v1/rooms/{roomId}/leave`
 
@@ -150,7 +188,7 @@ go run ./cmd/server
 
 响应：返回房间对象（`status=playing`，并带游戏状态）。
 
-### 8) 下一局（新增）
+### 8) 下一局
 
 `POST /api/v1/rooms/{roomId}/next-hand`
 
@@ -165,59 +203,41 @@ go run ./cmd/server
 
 响应：返回新一局初始化后的房间对象。
 
+### 9) 房主添加 AI
+
+`POST /api/v1/rooms/{roomId}/ai`
+
+请求：
+```json
+{
+  "name": "Bot A"
+}
+```
+
+约束：
+- 仅房主
+- 仅 waiting
+
+### 10) 房主移除 AI
+
+`DELETE /api/v1/rooms/{roomId}/ai/{aiUserId}`
+
+约束：
+- 仅房主
+- 仅 waiting
+
 ---
 
-### 9) 获取房间游戏状态（轮询）
+### 11) 获取房间游戏状态（轮询）
 
 `GET /api/v1/rooms/{roomId}/state?sinceVersion=12`
 
-有变化响应（示例）：
-```json
-{
-  "roomId": "r-1",
-  "roomName": "room-a",
-  "roomStatus": "playing",
-  "stateVersion": 13,
-  "game": {
-    "stage": "flop",
-    "pot": 20,
-    "dealerPos": 0,
-    "turnPos": 1,
-    "communityCards": [
-      {"rank": 14, "suit": 3},
-      {"rank": 10, "suit": 2},
-      {"rank": 7, "suit": 1}
-    ],
-    "players": [
-      {
-        "userId": "u-1",
-        "username": "alice",
-        "seatIndex": 0,
-        "stack": 190,
-        "folded": false,
-        "lastAction": "bet",
-        "won": 0,
-        "isTurn": false,
-        "holeCards": [
-          {"rank": 13, "suit": 0},
-          {"rank": 13, "suit": 1}
-        ]
-      }
-    ],
-    "result": null
-  }
-}
-```
+响应包含：
+- `roomPlayers[].isAi`
+- `game.players[].isAi`
+- `aiMemory`
 
-无变化响应：
-```json
-{
-  "notModified": true,
-  "version": 13
-}
-```
-
-### 10) 提交动作
+### 12) 提交动作
 
 `POST /api/v1/rooms/{roomId}/actions`
 
@@ -259,7 +279,7 @@ go run ./cmd/server
 
 - 每人 2 张底牌
 - 公共牌按 flop(3) / turn(1) / river(1)
-- 动作：`check / call / bet / fold`
+- 动作：`check / call / bet / allin / fold`
 - 若只剩 1 人未弃牌，立即结束
 - showdown：7 选 5 比较牌型并分配底池
 - 不实现 side pot

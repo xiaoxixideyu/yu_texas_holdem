@@ -1,0 +1,84 @@
+package ai
+
+import "context"
+
+type Service interface {
+	Enabled() bool
+	DecideAction(ctx context.Context, input DecisionInput) (Decision, error)
+	SummarizeHand(ctx context.Context, input SummaryInput) (Summary, error)
+}
+
+type PlayerSnapshot struct {
+	UserID       string `json:"userId"`
+	Username     string `json:"username"`
+	IsAI         bool   `json:"isAi"`
+	SeatIndex    int    `json:"seatIndex"`
+	Stack        int    `json:"stack"`
+	Folded       bool   `json:"folded"`
+	AllIn        bool   `json:"allIn"`
+	Contributed  int    `json:"contributed"`
+	RoundContrib int    `json:"roundContrib"`
+	LastAction   string `json:"lastAction"`
+	Won          int    `json:"won"`
+}
+
+type ActionLog struct {
+	UserID   string `json:"userId"`
+	Username string `json:"username"`
+	Action   string `json:"action"`
+	Amount   int    `json:"amount"`
+	Stage    string `json:"stage"`
+}
+
+type DecisionInput struct {
+	RoomID          string             `json:"roomId"`
+	HandID          int64              `json:"handId"`
+	StateVersion    int64              `json:"stateVersion"`
+	AIUserID        string             `json:"aiUserId"`
+	AIUsername      string             `json:"aiUsername"`
+	Stage           string             `json:"stage"`
+	Pot             int                `json:"pot"`
+	RoundBet        int                `json:"roundBet"`
+	OpenBetMin      int                `json:"openBetMin"`
+	BetMin          int                `json:"betMin"`
+	CallAmount      int                `json:"callAmount"`
+	MinBet          int                `json:"minBet"`
+	MinRaise        int                `json:"minRaise"`
+	Stack           int                `json:"stack"`
+	AllowedActions  []string           `json:"allowedActions"`
+	CommunityCards  []string           `json:"communityCards"`
+	Players         []PlayerSnapshot   `json:"players"`
+	RecentActionLog []ActionLog        `json:"recentActionLog"`
+	MemorySummaries []string           `json:"memorySummaries"`
+	Profiles        map[string]Profile `json:"profiles"`
+}
+
+type Decision struct {
+	Action string `json:"action"`
+	Amount int    `json:"amount"`
+}
+
+type Profile struct {
+	Style      string   `json:"style"`
+	Tendencies []string `json:"tendencies"`
+	Advice     string   `json:"advice"`
+}
+
+type SummaryInput struct {
+	RoomID          string             `json:"roomId"`
+	HandID          int64              `json:"handId"`
+	AIUserID        string             `json:"aiUserId"`
+	AIUsername      string             `json:"aiUsername"`
+	ActionLogs      []ActionLog        `json:"actionLogs"`
+	Winners         []string           `json:"winners"`
+	Reason          string             `json:"reason"`
+	CommunityCards  []string           `json:"communityCards"`
+	Players         []PlayerSnapshot   `json:"players"`
+	ExistingMemory  []string           `json:"existingMemory"`
+	ExistingProfile map[string]Profile `json:"existingProfile"`
+}
+
+type Summary struct {
+	HandSummary      string             `json:"handSummary"`
+	OpponentProfiles map[string]Profile `json:"opponentProfiles"`
+}

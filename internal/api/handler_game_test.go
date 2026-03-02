@@ -95,7 +95,7 @@ func TestGameHandler_ActionRevealValidationAndVersionConflict(t *testing.T) {
 	h := &GameHandler{Store: ms}
 
 	r, _ := ms.GetRoom(room.RoomID)
-	req1 := httptest.NewRequest(http.MethodPost, "/api/v1/rooms/"+room.RoomID+"/actions", strings.NewReader(`{"actionId":"r-before","type":"reveal","revealMask":1,"expectedVersion":`+int64ToString(r.StateVersion)+`}`))
+	req1 := httptest.NewRequest(http.MethodPost, "/api/v1/rooms/"+room.RoomID+"/actions", strings.NewReader(`{"actionId":"r-before","type":"reveal","revealMask":1,"expectedVersion":`+int64ToString(r.StateVersion)+`} `))
 	w1 := httptest.NewRecorder()
 	h.Action(w1, req1, owner)
 	if w1.Code != http.StatusBadRequest {
@@ -108,14 +108,14 @@ func TestGameHandler_ActionRevealValidationAndVersionConflict(t *testing.T) {
 	}
 	r, _ = ms.GetRoom(room.RoomID)
 
-	req2 := httptest.NewRequest(http.MethodPost, "/api/v1/rooms/"+room.RoomID+"/actions", strings.NewReader(`{"actionId":"r-conflict","type":"reveal","revealMask":2,"expectedVersion":`+int64ToString(r.StateVersion-1)+`}`))
+	req2 := httptest.NewRequest(http.MethodPost, "/api/v1/rooms/"+room.RoomID+"/actions", strings.NewReader(`{"actionId":"r-conflict","type":"reveal","revealMask":2,"expectedVersion":`+int64ToString(r.StateVersion-1)+`} `))
 	w2 := httptest.NewRecorder()
 	h.Action(w2, req2, owner)
 	if w2.Code != http.StatusConflict {
 		t.Fatalf("expected version conflict status 409, got %d body=%s", w2.Code, w2.Body.String())
 	}
 
-	req3 := httptest.NewRequest(http.MethodPost, "/api/v1/rooms/"+room.RoomID+"/actions", strings.NewReader(`{"actionId":"r-invalid","type":"reveal","revealMask":9,"expectedVersion":`+int64ToString(r.StateVersion)+`}`))
+	req3 := httptest.NewRequest(http.MethodPost, "/api/v1/rooms/"+room.RoomID+"/actions", strings.NewReader(`{"actionId":"r-invalid","type":"reveal","revealMask":9,"expectedVersion":`+int64ToString(r.StateVersion)+`} `))
 	w3 := httptest.NewRecorder()
 	h.Action(w3, req3, owner)
 	if w3.Code != http.StatusBadRequest {
@@ -243,4 +243,29 @@ func int64ToString(v int64) string {
 		buf[i] = '-'
 	}
 	return string(buf[i:])
+}
+
+func TestGameHandler_GetStateIncludesIsAi(t *testing.T) {
+	ms := store.NewMemoryStore()
+	owner := ms.CreateSession("owner")
+	room := ms.CreateRoom(owner, "room", 10, 10)
+	if _, _, err := ms.AddAI(room.RoomID, owner.UserID, "bot"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ms.StartGame(room.RoomID, owner.UserID); err != nil {
+		t.Fatal(err)
+	}
+
+	h := &GameHandler{Store: ms}
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/rooms/"+room.RoomID+"/state", nil)
+	w := httptest.NewRecorder()
+	h.GetState(w, req, owner)
+
+	body := w.Body.String()
+	if !strings.Contains(body, "\"isAi\":true") {
+		t.Fatalf("expected game/player isAi true in state body=%s", body)
+	}
+	if !strings.Contains(body, "\"aiMemory\":") {
+		t.Fatalf("expected aiMemory in state body=%s", body)
+	}
 }

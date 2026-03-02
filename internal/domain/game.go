@@ -20,6 +20,7 @@ const (
 type GamePlayer struct {
 	UserID        string
 	Username      string
+	IsAI          bool
 	SeatIndex     int
 	Stack         int
 	HoleCards     []Card

@@ -1,4 +1,5 @@
 let currentUserId = "";
+let ownerUserId = "";
 
 const roomId = qs("roomId");
 if (!roomId) {
@@ -259,10 +260,37 @@ function updateActionButtons(data) {
   }
 }
 
+function aiBadge(isAi) {
+  return isAi ? '<span class="badge badge-ai">AI</span>' : "";
+}
+
+function renderAIList(data) {
+  const root = document.getElementById("ai-list");
+  if (!root) return;
+  const players = (data.roomPlayers || []).filter((p) => p.isAi);
+  if (!players.length) {
+    root.innerHTML = `<p class="hint">暂无 AI 玩家</p>`;
+    return;
+  }
+  root.innerHTML = players
+    .map(
+      (p) => `
+      <div class="ai-list-item">
+        <span>${p.username}</span>
+        <button class="btn-danger" type="button" onclick="removeAI('${attrEscape(p.userId)}')">删除</button>
+      </div>
+    `
+    )
+    .join("");
+}
+
 function updateOwnerActions(data) {
+  ownerUserId = data.ownerUserId;
   const btnStartGame = document.getElementById("btn-start-game");
   const btnNextHand = document.getElementById("btn-next-hand");
   const hint = document.getElementById("next-hand-hint");
+  const aiManager = document.getElementById("ai-manager");
+  const btnAddAI = document.getElementById("btn-add-ai");
   if (!btnStartGame || !btnNextHand || !hint) return;
 
   const isOwner = data.ownerUserId === currentUserId;
@@ -274,6 +302,13 @@ function updateOwnerActions(data) {
 
   const handFinished = !!(data.game && data.game.stage === "finished");
   hint.style.display = !isOwner && handFinished ? "block" : "none";
+
+  if (aiManager && btnAddAI) {
+    aiManager.style.display = isOwner && data.roomStatus === "waiting" ? "block" : "none";
+    btnAddAI.disabled = !(isOwner && data.roomStatus === "waiting");
+  }
+
+  renderAIList(data);
 }
 
 function updateMyStack(data) {
@@ -324,6 +359,7 @@ function renderWaitingPlayers(data) {
           <div class="player-name">
             ${p.username}
             ${p.userId === data.ownerUserId ? '<span class="badge badge-owner">房主</span>' : ""}
+            ${aiBadge(p.isAi)}
           </div>
           <div class="player-details">座位 ${p.seat} · 筹码 ${typeof p.stack === "number" ? p.stack : "-"}</div>
         </div>
@@ -342,6 +378,7 @@ function renderState(data) {
         <div><span class="meta-label">状态</span><div class="meta-value">等待开局</div></div>
       </div>`;
     renderWaitingPlayers(data);
+    renderAIList(data);
     renderActiveQuickChatBubbles();
     updateMyStack(data);
     updateOwnerActions(data);
@@ -393,6 +430,7 @@ function renderState(data) {
       if (idx === g.bigBlindPos) badges.push('<span class="badge badge-bb">BB</span>');
       if (isTurn) badges.push('<span class="badge badge-turn">行动中</span>');
       if (isFolded) badges.push('<span class="badge badge-folded">已弃牌</span>');
+      if (p.isAi) badges.push('<span class="badge badge-ai">AI</span>');
 
       const holeCardsHtml = (p.holeCards || []).length
         ? p.holeCards.map((c) => cardHtml(c)).join("")
@@ -412,6 +450,7 @@ function renderState(data) {
     })
     .join("");
 
+  renderAIList(data);
   renderActiveQuickChatBubbles();
   updateRevealControls(data);
   updateMyStack(data);
@@ -607,6 +646,12 @@ function createLocalQuickChatEvent(phraseId) {
   };
 }
 
+function stopPollingAndBackToRooms() {
+  if (pollTimer) clearInterval(pollTimer);
+  clearAllQuickChatState();
+  location.href = "/rooms.html";
+}
+
 async function loadQuickChats() {
   try {
     const data = await api(`/api/v1/rooms/${roomId}/quick-chats?sinceEventId=${quickChatLastEventId}`);
@@ -626,6 +671,10 @@ async function loadQuickChats() {
     events.forEach((event) => applyQuickChatEvent(event, serverNowMs));
     trimSeenQuickChatEvents();
   } catch (err) {
+    if (err && err.status === 404) {
+      stopPollingAndBackToRooms();
+      return;
+    }
     console.error(err);
   }
 }
@@ -654,6 +703,10 @@ async function sendQuickChat(phraseId) {
 
     await loadQuickChats();
   } catch (err) {
+    if (err && err.status === 404) {
+      stopPollingAndBackToRooms();
+      return;
+    }
     if (String(err.message || "").includes("quick chat cooldown")) {
       const retryAfterMs = Number(err && err.data && err.data.retryAfterMs);
       const hintMs = Number.isFinite(retryAfterMs) && retryAfterMs > 0 ? retryAfterMs : quickChatCooldownMs;
@@ -683,6 +736,10 @@ async function initQuickChatConfig() {
     const serverNowMs = Number(data.serverNowMs || Date.now());
     events.forEach((event) => applyQuickChatEvent(event, serverNowMs));
   } catch (err) {
+    if (err && err.status === 404) {
+      stopPollingAndBackToRooms();
+      return;
+    }
     renderQuickChatButtons([]);
     setQuickChatFeedback(`短句初始化失败：${err.message}`, true);
   }
@@ -698,6 +755,10 @@ async function loadState() {
     const isMyTurn = !!(data.game && data.game.players && data.game.players.find((p) => p.userId === currentUserId && p.isTurn));
     resetPolling(isMyTurn ? 700 : 1200);
   } catch (err) {
+    if (err && err.status === 404) {
+      stopPollingAndBackToRooms();
+      return;
+    }
     console.error(err);
     logLine(`状态拉取失败：${err.message}`);
   }
@@ -736,6 +797,10 @@ async function doAction(type) {
     if (betInput) betInput.value = "";
     await loadState();
   } catch (err) {
+    if (err && err.status === 404) {
+      stopPollingAndBackToRooms();
+      return;
+    }
     logLine(`操作失败（${toActionText(type)}）：${err.message}`);
   }
 }
@@ -754,6 +819,10 @@ async function doReveal(mask) {
     logLine(`亮牌设置成功：${REVEAL_TEXT[Number(mask)] || Number(mask)}`);
     await loadState();
   } catch (err) {
+    if (err && err.status === 404) {
+      stopPollingAndBackToRooms();
+      return;
+    }
     logLine(`亮牌设置失败：${err.message}`);
   }
 }
@@ -777,6 +846,30 @@ async function nextHand() {
     logLine(`开始下一局失败：${err.message}`);
   }
 }
+
+async function addAI() {
+  const input = document.getElementById("ai-name");
+  const name = input ? String(input.value || "").trim() : "";
+  try {
+    await api(`/api/v1/rooms/${roomId}/ai`, { method: "POST", body: { name } });
+    if (input) input.value = "";
+    logLine("已添加 AI 玩家");
+    await loadState();
+  } catch (err) {
+    logLine(`添加 AI 失败：${err.message}`);
+  }
+}
+
+window.removeAI = async function removeAI(aiUserId) {
+  if (!aiUserId) return;
+  try {
+    await api(`/api/v1/rooms/${roomId}/ai/${encodeURIComponent(aiUserId)}`, { method: "DELETE" });
+    logLine("已移除 AI 玩家");
+    await loadState();
+  } catch (err) {
+    logLine(`移除 AI 失败：${err.message}`);
+  }
+};
 
 async function leaveRoom() {
   try {
@@ -810,6 +903,8 @@ function resetPolling(ms) {
   document.getElementById("btn-start-game").addEventListener("click", startGame);
   document.getElementById("btn-next-hand").addEventListener("click", nextHand);
   document.getElementById("btn-leave-room").addEventListener("click", leaveRoom);
+  const btnAddAI = document.getElementById("btn-add-ai");
+  if (btnAddAI) btnAddAI.addEventListener("click", addAI);
   document.getElementById("btn-start-game").style.display = "none";
   document.getElementById("btn-next-hand").style.display = "none";
 

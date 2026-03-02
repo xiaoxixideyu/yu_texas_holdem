@@ -1,3 +1,5 @@
+version: '3.8'
+
 services:
   texas_yu:
     build:
@@ -6,4 +8,11 @@ services:
     container_name: texas_yu_app
     ports:
       - "15001:8080"
+    environment:
+      - AI_BASE_URL=
+      - AI_API_KEY=
+      - AI_MODEL=openai/gpt-oss-120b
+      - AI_API_FORMAT=chat_completion
+      - AI_TIMEOUT_MS=8000
+      - AI_MAX_RETRY=10
     restart: unless-stopped

@@ -18,6 +18,10 @@ type createRoomReq struct {
 	BetMin     int    `json:"betMin"`
 }
 
+type addAIReq struct {
+	Name string `json:"name"`
+}
+
 func (h *RoomHandler) ListRooms(w http.ResponseWriter, r *http.Request, _ *store.Session) {
 	if r.Method != http.MethodGet {
 		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
@@ -67,6 +71,14 @@ func roomIDFromPath(path string) string {
 		return ""
 	}
 	return parts[3]
+}
+
+func aiUserIDFromPath(path string) string {
+	parts := strings.Split(strings.Trim(path, "/"), "/")
+	if len(parts) < 6 {
+		return ""
+	}
+	return parts[5]
 }
 
 func (h *RoomHandler) JoinRoom(w http.ResponseWriter, r *http.Request, s *store.Session) {
@@ -138,6 +150,48 @@ func (h *RoomHandler) NextHand(w http.ResponseWriter, r *http.Request, s *store.
 		return
 	}
 	room, err := h.Store.NextHand(roomID, s.UserID)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, room)
+}
+
+func (h *RoomHandler) AddAI(w http.ResponseWriter, r *http.Request, s *store.Session) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	roomID := roomIDFromPath(r.URL.Path)
+	if roomID == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid room id"})
+		return
+	}
+	var req addAIReq
+	if err := readJSON(r, &req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid json"})
+		return
+	}
+	room, _, err := h.Store.AddAI(roomID, s.UserID, req.Name)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, room)
+}
+
+func (h *RoomHandler) RemoveAI(w http.ResponseWriter, r *http.Request, s *store.Session) {
+	if r.Method != http.MethodDelete {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	roomID := roomIDFromPath(r.URL.Path)
+	aiUserID := aiUserIDFromPath(r.URL.Path)
+	if roomID == "" || aiUserID == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid path"})
+		return
+	}
+	room, err := h.Store.RemoveAI(roomID, s.UserID, aiUserID)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
 		return

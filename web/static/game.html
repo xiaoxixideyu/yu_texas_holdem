@@ -58,6 +58,13 @@
         <button id="btn-next-hand">下一局</button>
         <button id="btn-leave-room" class="btn-secondary">离开房间</button>
       </div>
+      <div id="ai-manager" class="ai-manager" style="display:none; margin-top: 12px;">
+        <div class="ai-manager-row">
+          <input id="ai-name" type="text" placeholder="AI 名称（可选）" />
+          <button id="btn-add-ai" class="btn-secondary" type="button">添加 AI</button>
+        </div>
+        <div id="ai-list" class="ai-list"></div>
+      </div>
       <p id="next-hand-hint" class="hint" style="display:none;margin-top:8px;">仅房主可在本局结束后开始下一局。</p>
       <p id="action-hint" class="hint" style="margin-top:8px;">游戏未开始，暂不可操作。</p>
     </section>

@@ -1,6 +1,37 @@
 package store
 
-import "testing"
+import (
+	"context"
+	"testing"
+	"time"
+
+	"texas_yu/internal/ai"
+)
+
+type stubAIService struct {
+	decisionFn  func(ctx context.Context, input ai.DecisionInput) (ai.Decision, error)
+	summaryFn   func(ctx context.Context, input ai.SummaryInput) (ai.Summary, error)
+	decideCount int
+	sumCount    int
+}
+
+func (s *stubAIService) Enabled() bool { return true }
+
+func (s *stubAIService) DecideAction(ctx context.Context, input ai.DecisionInput) (ai.Decision, error) {
+	s.decideCount++
+	if s.decisionFn != nil {
+		return s.decisionFn(ctx, input)
+	}
+	return ai.Decision{Action: "check", Amount: 0}, nil
+}
+
+func (s *stubAIService) SummarizeHand(ctx context.Context, input ai.SummaryInput) (ai.Summary, error) {
+	s.sumCount++
+	if s.summaryFn != nil {
+		return s.summaryFn(ctx, input)
+	}
+	return ai.Summary{HandSummary: "ok", OpponentProfiles: map[string]ai.Profile{}}, nil
+}
 
 func TestStore_RoomLifecycleAndVersionConflict(t *testing.T) {
 	s := NewMemoryStore()
@@ -258,5 +289,246 @@ func TestStore_LeaveRoomAndNextHand(t *testing.T) {
 	}
 	if r.Game == nil || r.Game.Stage != "preflop" {
 		t.Fatalf("expected preflop after next hand")
+	}
+}
+
+func TestStore_AddRemoveAIOwnerOnlyAndState(t *testing.T) {
+	s := NewMemoryStore()
+	owner := s.CreateSession("owner")
+	guest := s.CreateSession("guest")
+	room := s.CreateRoom(owner, "room", 10, 10)
+	if _, err := s.JoinRoom(room.RoomID, guest); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, _, err := s.AddAI(room.RoomID, guest.UserID, "bot-1"); err == nil {
+		t.Fatalf("expected non-owner add ai fail")
+	}
+	if _, _, err := s.AddAI(room.RoomID, owner.UserID, "bot-1"); err != nil {
+		t.Fatalf("owner add ai failed: %v", err)
+	}
+	if _, _, err := s.AddAI(room.RoomID, owner.UserID, "bot-2"); err != nil {
+		t.Fatalf("owner add second ai failed: %v", err)
+	}
+
+	r, _ := s.GetRoom(room.RoomID)
+	aiCount := 0
+	for _, p := range r.Players {
+		if p.IsAI {
+			aiCount++
+		}
+	}
+	if aiCount != 2 {
+		t.Fatalf("expected 2 ai players, got %d", aiCount)
+	}
+
+	var aiUserID string
+	for _, p := range r.Players {
+		if p.IsAI {
+			aiUserID = p.UserID
+			break
+		}
+	}
+	if aiUserID == "" {
+		t.Fatalf("missing ai user id")
+	}
+	if _, err := s.RemoveAI(room.RoomID, guest.UserID, aiUserID); err == nil {
+		t.Fatalf("expected non-owner remove ai fail")
+	}
+	if _, err := s.RemoveAI(room.RoomID, owner.UserID, aiUserID); err != nil {
+		t.Fatalf("owner remove ai failed: %v", err)
+	}
+}
+
+func TestStore_NoHumansRoomDeletedEvenWithAIs(t *testing.T) {
+	s := NewMemoryStore()
+	owner := s.CreateSession("owner")
+	room := s.CreateRoom(owner, "room", 10, 10)
+	if _, _, err := s.AddAI(room.RoomID, owner.UserID, "bot"); err != nil {
+		t.Fatal(err)
+	}
+
+	out, err := s.LeaveRoom(room.RoomID, owner.UserID)
+	if err != nil {
+		t.Fatalf("leave failed: %v", err)
+	}
+	if out != nil {
+		t.Fatalf("expected room deleted")
+	}
+	if _, ok := s.GetRoom(room.RoomID); ok {
+		t.Fatalf("room should not exist")
+	}
+}
+
+func TestStore_AITurnAutoActionWithFallbackAndSummary(t *testing.T) {
+	stub := &stubAIService{}
+	stub.decisionFn = func(_ context.Context, input ai.DecisionInput) (ai.Decision, error) {
+		return ai.Decision{Action: "invalid_action", Amount: -1}, nil
+	}
+	stub.summaryFn = func(_ context.Context, input ai.SummaryInput) (ai.Summary, error) {
+		profiles := map[string]ai.Profile{}
+		for _, p := range input.Players {
+			if !p.IsAI {
+				profiles[p.UserID] = ai.Profile{Style: "tight", Tendencies: []string{"calls"}, Advice: "pressure"}
+			}
+		}
+		return ai.Summary{HandSummary: "ai summary", OpponentProfiles: profiles}, nil
+	}
+
+	s := NewMemoryStore(Options{AI: stub})
+	owner := s.CreateSession("owner")
+	room := s.CreateRoom(owner, "room", 10, 10)
+	if _, _, err := s.AddAI(room.RoomID, owner.UserID, "bot"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.StartGame(room.RoomID, owner.UserID); err != nil {
+		t.Fatal(err)
+	}
+
+	r, _ := s.GetRoom(room.RoomID)
+	if r == nil || r.Game == nil {
+		t.Fatalf("game missing")
+	}
+	if r.Game.Players[r.Game.TurnPos].UserID == owner.UserID {
+		if _, err := s.ApplyAction(room.RoomID, owner.UserID, "owner-advance", "call", 0, r.StateVersion); err != nil {
+			t.Fatalf("owner advance action failed: %v", err)
+		}
+	}
+
+	deadline := time.Now().Add(500 * time.Millisecond)
+	for {
+		r, ok := s.GetRoom(room.RoomID)
+		if !ok || r == nil || r.Game == nil {
+			t.Fatalf("room/game missing")
+		}
+		if r.Game.TurnPos < len(r.Game.Players) && r.Game.Players[r.Game.TurnPos].IsAI {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("ai did not get turn in time")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	r, _ = s.GetRoom(room.RoomID)
+	for r != nil && r.Game != nil && r.Game.Stage != "finished" {
+		turnUser := r.Game.Players[r.Game.TurnPos].UserID
+		_, err := s.ApplyAction(room.RoomID, turnUser, "force-finish-"+turnUser+time.Now().Format("150405.000000"), "fold", 0, r.StateVersion)
+		if err != nil {
+			break
+		}
+		r, _ = s.GetRoom(room.RoomID)
+	}
+
+	deadline = time.Now().Add(2 * time.Second)
+	for {
+		r2, ok := s.GetRoom(room.RoomID)
+		if !ok || r2 == nil {
+			t.Fatalf("room missing")
+		}
+		found := false
+		for _, p := range r2.Players {
+			if p.IsAI {
+				mem := r2.AIMemory[p.UserID]
+				if mem != nil && mem.LastSummarizedHand > 0 {
+					found = true
+				}
+			}
+		}
+		if found {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("ai summary not written in time")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+func TestStore_SummaryTriggeredOnLeaveFinish(t *testing.T) {
+	stub := &stubAIService{}
+	stub.summaryFn = func(_ context.Context, _ ai.SummaryInput) (ai.Summary, error) {
+		return ai.Summary{HandSummary: "leave summary", OpponentProfiles: map[string]ai.Profile{}}, nil
+	}
+
+	s := NewMemoryStore(Options{AI: stub})
+	owner := s.CreateSession("owner")
+	guest := s.CreateSession("guest")
+	room := s.CreateRoom(owner, "room", 10, 10)
+	if _, _, err := s.AddAI(room.RoomID, owner.UserID, "bot"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.JoinRoom(room.RoomID, guest); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.StartGame(room.RoomID, owner.UserID); err != nil {
+		t.Fatal(err)
+	}
+
+	// First fold guest, then owner leaves to force last-standing finish by leave path.
+	r, _ := s.GetRoom(room.RoomID)
+	if r == nil || r.Game == nil {
+		t.Fatalf("game missing")
+	}
+	for i := 0; i < 8 && r.Game.Stage != "finished"; i++ {
+		turnUser := r.Game.Players[r.Game.TurnPos].UserID
+		actionID := "prep-" + turnUser + time.Now().Format("150405.000000")
+		action := "fold"
+		if turnUser != guest.UserID {
+			action = "check"
+			for _, gp := range r.Game.Players {
+				if gp.UserID == turnUser {
+					if r.Game.RoundBet-gp.RoundContrib > 0 {
+						action = "call"
+					}
+					break
+				}
+			}
+		}
+		if _, err := s.ApplyAction(room.RoomID, turnUser, actionID, action, 0, r.StateVersion); err != nil {
+			break
+		}
+		r, _ = s.GetRoom(room.RoomID)
+		if r == nil || r.Game == nil {
+			break
+		}
+		guestFolded := false
+		for _, gp := range r.Game.Players {
+			if gp.UserID == guest.UserID {
+				guestFolded = gp.Folded
+				break
+			}
+		}
+		if guestFolded {
+			break
+		}
+	}
+
+	if _, err := s.LeaveRoom(room.RoomID, owner.UserID); err != nil {
+		t.Fatal(err)
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		r2, ok := s.GetRoom(room.RoomID)
+		if !ok || r2 == nil {
+			t.Fatalf("room missing")
+		}
+		found := false
+		for _, p := range r2.Players {
+			if p.IsAI {
+				mem := r2.AIMemory[p.UserID]
+				if mem != nil && mem.LastSummarizedHand > 0 {
+					found = true
+				}
+			}
+		}
+		if found {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("summary not written after leave-finish")
+		}
+		time.Sleep(20 * time.Millisecond)
 	}
 }

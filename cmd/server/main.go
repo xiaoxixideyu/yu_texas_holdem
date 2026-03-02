@@ -5,12 +5,21 @@ import (
 	"net/http"
 	"strings"
 
+	"texas_yu/internal/ai"
 	"texas_yu/internal/api"
 	"texas_yu/internal/store"
 )
 
 func main() {
-	ms := store.NewMemoryStore()
+	aiCfg := ai.LoadConfigFromEnv()
+	aiSvc := ai.NewService(aiCfg)
+	if aiSvc.Enabled() {
+		log.Printf("AI enabled: model=%s format=%s baseURL=%s timeout=%s maxRetry=%d", aiCfg.Model, aiCfg.APIFormat, aiCfg.BaseURL, aiCfg.Timeout, aiCfg.MaxRetry)
+	} else {
+		log.Printf("AI disabled: set AI_API_KEY and AI_MODEL to enable")
+	}
+
+	ms := store.NewMemoryStore(store.Options{AI: aiSvc})
 	authH := &api.AuthHandler{Store: ms}
 	roomH := &api.RoomHandler{Store: ms}
 	gameH := &api.GameHandler{Store: ms}
@@ -49,6 +58,16 @@ func main() {
 			roomH.LeaveRoom(w, r, s)
 		case "next-hand":
 			roomH.NextHand(w, r, s)
+		case "ai":
+			if len(parts) == 2 && r.Method == http.MethodPost {
+				roomH.AddAI(w, r, s)
+				return
+			}
+			if len(parts) == 3 && r.Method == http.MethodDelete {
+				roomH.RemoveAI(w, r, s)
+				return
+			}
+			w.WriteHeader(http.StatusMethodNotAllowed)
 		case "state":
 			gameH.GetState(w, r, s)
 		case "actions":
@@ -82,7 +101,7 @@ func cors(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Access-Control-Allow-Origin", "*")
 		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-User-Id")
-		w.Header().Set("Access-Control-Allow-Methods", "GET,POST,OPTIONS")
+		w.Header().Set("Access-Control-Allow-Methods", "GET,POST,DELETE,OPTIONS")
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(http.StatusNoContent)
 			return

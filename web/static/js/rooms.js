@@ -29,6 +29,12 @@
     return status === "waiting" ? "等待中" : status === "playing" ? "游戏中" : status;
   }
 
+  function roomPopulationText(players) {
+    const humans = players.filter((p) => !p.isAi).length;
+    const bots = players.filter((p) => p.isAi).length;
+    return `真人${humans} + AI${bots}`;
+  }
+
   function renderRooms(rooms) {
     const root = document.getElementById("rooms");
     if (!rooms.length) {
@@ -41,11 +47,11 @@
         <div class="room-item">
           <div>
             <strong>${r.name}</strong>
-            <div class="hint">${r.players.length} 人 · ${roomStatusText(r.status)} · 开局≥${r.openBetMin || 10} · 加注≥${r.betMin || 10}</div>
+            <div class="hint">${roomPopulationText(r.players || [])} · ${roomStatusText(r.status)} · 开局≥${r.openBetMin || 10} · 加注≥${r.betMin || 10}</div>
           </div>
           <button onclick="joinRoom('${r.roomId}')">进入</button>
         </div>
-      `
+`
       )
       .join("");
   }

@@ -29,6 +29,7 @@ type quickChatReq struct {
 type gamePlayerView struct {
 	UserID       string         `json:"userId"`
 	Username     string         `json:"username"`
+	IsAI         bool           `json:"isAi"`
 	SeatIndex    int            `json:"seatIndex"`
 	Stack        int            `json:"stack"`
 	Folded       bool           `json:"folded"`
@@ -176,6 +177,7 @@ func (h *GameHandler) GetState(w http.ResponseWriter, r *http.Request, s *store.
 			"username": p.Username,
 			"seat":     p.Seat,
 			"stack":    p.Stack,
+			"isAi":     p.IsAI,
 		})
 	}
 
@@ -187,6 +189,7 @@ func (h *GameHandler) GetState(w http.ResponseWriter, r *http.Request, s *store.
 		"stateVersion":     room.StateVersion,
 		"roomPlayers":      roomPlayers,
 		"canStartNextHand": room.OwnerUserID == s.UserID && room.Game != nil && room.Game.Stage == domain.StageFinished,
+		"aiMemory":         room.AIMemory,
 	}
 	if room.Game == nil {
 		resp["game"] = nil
@@ -229,6 +232,7 @@ func (h *GameHandler) GetState(w http.ResponseWriter, r *http.Request, s *store.
 		pv := gamePlayerView{
 			UserID:       p.UserID,
 			Username:     p.Username,
+			IsAI:         p.IsAI,
 			SeatIndex:    p.SeatIndex,
 			Stack:        p.Stack,
 			Folded:       p.Folded,
