@@ -21,6 +21,7 @@ type GamePlayer struct {
 	UserID        string
 	Username      string
 	IsAI          bool
+	AIManaged     bool
 	SeatIndex     int
 	Stack         int
 	HoleCards     []Card

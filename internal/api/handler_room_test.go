@@ -1,13 +1,30 @@
 package api
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 
+	"texas_yu/internal/ai"
 	"texas_yu/internal/store"
 )
+
+type roomHandlerAIStub struct{}
+
+func (roomHandlerAIStub) Enabled() bool { return true }
+
+func (roomHandlerAIStub) DecideAction(_ context.Context, input ai.DecisionInput) (ai.Decision, error) {
+	if len(input.AllowedActions) > 0 {
+		return ai.Decision{Action: input.AllowedActions[0], Amount: 0}, nil
+	}
+	return ai.Decision{Action: "fold", Amount: 0}, nil
+}
+
+func (roomHandlerAIStub) SummarizeHand(_ context.Context, _ ai.SummaryInput) (ai.Summary, error) {
+	return ai.Summary{HandSummary: "ok", OpponentProfiles: map[string]ai.Profile{}}, nil
+}
 
 func TestRoomHandler_AddRemoveAIOwnerOnly(t *testing.T) {
 	ms := store.NewMemoryStore()
@@ -118,5 +135,66 @@ func TestRoomHandler_JoinSpectateIdempotentBehavior(t *testing.T) {
 	r2, _ := ms.GetRoom(room.RoomID)
 	if len(r2.Spectators) != 0 {
 		t.Fatalf("expected spectator list unchanged for player, got %d", len(r2.Spectators))
+	}
+}
+
+func TestRoomHandler_ToggleAIManaged(t *testing.T) {
+	ms := store.NewMemoryStore(store.Options{AI: roomHandlerAIStub{}})
+	owner := ms.CreateSession("owner")
+	guest := ms.CreateSession("guest")
+	room := ms.CreateRoom(owner, "room", 10, 10)
+	if _, err := ms.JoinRoom(room.RoomID, guest); err != nil {
+		t.Fatal(err)
+	}
+	h := &RoomHandler{Store: ms}
+
+	enableReq := httptest.NewRequest(http.MethodPost, "/api/v1/rooms/"+room.RoomID+"/ai-managed", strings.NewReader(`{"enabled":true}`))
+	enableW := httptest.NewRecorder()
+	h.ToggleAIManaged(enableW, enableReq, guest)
+	if enableW.Code != http.StatusOK {
+		t.Fatalf("expected enable ai managed success, got %d body=%s", enableW.Code, enableW.Body.String())
+	}
+
+	r1, _ := ms.GetRoom(room.RoomID)
+	enabled := false
+	for _, p := range r1.Players {
+		if p.UserID == guest.UserID {
+			enabled = p.AIManaged
+		}
+	}
+	if !enabled {
+		t.Fatalf("expected guest aiManaged=true after toggle")
+	}
+
+	disableReq := httptest.NewRequest(http.MethodPost, "/api/v1/rooms/"+room.RoomID+"/ai-managed", strings.NewReader(`{"enabled":false}`))
+	disableW := httptest.NewRecorder()
+	h.ToggleAIManaged(disableW, disableReq, guest)
+	if disableW.Code != http.StatusOK {
+		t.Fatalf("expected disable ai managed success, got %d body=%s", disableW.Code, disableW.Body.String())
+	}
+
+	r2, _ := ms.GetRoom(room.RoomID)
+	for _, p := range r2.Players {
+		if p.UserID == guest.UserID && p.AIManaged {
+			t.Fatalf("expected guest aiManaged=false after disable")
+		}
+	}
+}
+
+func TestRoomHandler_ToggleAIManaged_SpectatorForbidden(t *testing.T) {
+	ms := store.NewMemoryStore(store.Options{AI: roomHandlerAIStub{}})
+	owner := ms.CreateSession("owner")
+	spectator := ms.CreateSession("spectator")
+	room := ms.CreateRoom(owner, "room", 10, 10)
+	if _, err := ms.SpectateRoom(room.RoomID, spectator); err != nil {
+		t.Fatal(err)
+	}
+	h := &RoomHandler{Store: ms}
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/rooms/"+room.RoomID+"/ai-managed", strings.NewReader(`{"enabled":true}`))
+	w := httptest.NewRecorder()
+	h.ToggleAIManaged(w, req, spectator)
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("expected spectator toggle forbidden, got %d body=%s", w.Code, w.Body.String())
 	}
 }

@@ -22,6 +22,10 @@ type addAIReq struct {
 	Name string `json:"name"`
 }
 
+type aiManagedReq struct {
+	Enabled bool `json:"enabled"`
+}
+
 func (h *RoomHandler) ListRooms(w http.ResponseWriter, r *http.Request, _ *store.Session) {
 	if r.Method != http.MethodGet {
 		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
@@ -212,6 +216,33 @@ func (h *RoomHandler) RemoveAI(w http.ResponseWriter, r *http.Request, s *store.
 	room, err := h.Store.RemoveAI(roomID, s.UserID, aiUserID)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, room)
+}
+
+func (h *RoomHandler) ToggleAIManaged(w http.ResponseWriter, r *http.Request, s *store.Session) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	roomID := roomIDFromPath(r.URL.Path)
+	if roomID == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid room id"})
+		return
+	}
+	var req aiManagedReq
+	if err := readJSON(r, &req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid json"})
+		return
+	}
+	room, err := h.Store.SetPlayerAIManaged(roomID, s.UserID, req.Enabled)
+	if err != nil {
+		status := http.StatusBadRequest
+		if err.Error() == "spectator is read-only" || err.Error() == "user not in room" {
+			status = http.StatusForbidden
+		}
+		writeJSON(w, status, map[string]any{"error": err.Error()})
 		return
 	}
 	writeJSON(w, http.StatusOK, room)

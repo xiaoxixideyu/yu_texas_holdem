@@ -340,6 +340,166 @@ func TestStore_AddRemoveAIOwnerOnlyAndState(t *testing.T) {
 	}
 }
 
+func TestStore_ToggleAIManaged_BlocksManualThenAllowsAfterCancel(t *testing.T) {
+	releaseDecision := make(chan struct{})
+	stub := &stubAIService{}
+	stub.decisionFn = func(_ context.Context, input ai.DecisionInput) (ai.Decision, error) {
+		<-releaseDecision
+		if containsAction(input.AllowedActions, "check") {
+			return ai.Decision{Action: "check", Amount: 0}, nil
+		}
+		if containsAction(input.AllowedActions, "call") {
+			return ai.Decision{Action: "call", Amount: 0}, nil
+		}
+		return ai.Decision{Action: "fold", Amount: 0}, nil
+	}
+
+	s := NewMemoryStore(Options{AI: stub})
+	owner := s.CreateSession("owner")
+	guest := s.CreateSession("guest")
+	room := s.CreateRoom(owner, "room", 10, 10)
+	if _, err := s.JoinRoom(room.RoomID, guest); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.StartGame(room.RoomID, owner.UserID); err != nil {
+		t.Fatal(err)
+	}
+
+	r, ok := s.GetRoom(room.RoomID)
+	if !ok || r == nil || r.Game == nil {
+		t.Fatalf("room/game missing")
+	}
+	target := r.Game.Players[r.Game.TurnPos]
+	targetUserID := target.UserID
+	if target.IsAI {
+		t.Fatalf("expected human turn player")
+	}
+
+	enabledRoom, err := s.SetPlayerAIManaged(room.RoomID, targetUserID, true)
+	if err != nil {
+		t.Fatalf("enable ai managed failed: %v", err)
+	}
+	if enabledRoom == nil {
+		t.Fatalf("enable ai managed returned nil room")
+	}
+	if _, err := s.ApplyAction(room.RoomID, targetUserID, "managed-blocked", "fold", 0, enabledRoom.StateVersion); err == nil || err.Error() != "player is ai-managed" {
+		t.Fatalf("expected player is ai-managed error, got %v", err)
+	}
+
+	disabledRoom, err := s.SetPlayerAIManaged(room.RoomID, targetUserID, false)
+	if err != nil {
+		t.Fatalf("disable ai managed failed: %v", err)
+	}
+	if disabledRoom == nil {
+		t.Fatalf("disable ai managed returned nil room")
+	}
+
+	action := "check"
+	diff := 0
+	if r2, ok := s.GetRoom(room.RoomID); ok && r2 != nil && r2.Game != nil {
+		for _, gp := range r2.Game.Players {
+			if gp.UserID == targetUserID {
+				diff = r2.Game.RoundBet - gp.RoundContrib
+				break
+			}
+		}
+	}
+	if diff > 0 {
+		action = "call"
+	}
+	if _, err := s.ApplyAction(room.RoomID, targetUserID, "managed-unblocked", action, 0, disabledRoom.StateVersion); err != nil {
+		t.Fatalf("expected manual action after cancel managed to succeed, got %v", err)
+	}
+
+	close(releaseDecision)
+}
+
+func TestStore_ToggleAIManaged_RequiresEnabledAIService(t *testing.T) {
+	s := NewMemoryStore()
+	owner := s.CreateSession("owner")
+	guest := s.CreateSession("guest")
+	room := s.CreateRoom(owner, "room", 10, 10)
+	if _, err := s.JoinRoom(room.RoomID, guest); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.SetPlayerAIManaged(room.RoomID, owner.UserID, true); err == nil || err.Error() != "ai service disabled" {
+		t.Fatalf("expected ai service disabled error, got %v", err)
+	}
+}
+
+func TestStore_ToggleAIManaged_CurrentTurnActsByAI(t *testing.T) {
+	decisionCalled := make(chan struct{}, 1)
+	stub := &stubAIService{}
+	stub.decisionFn = func(_ context.Context, input ai.DecisionInput) (ai.Decision, error) {
+		select {
+		case decisionCalled <- struct{}{}:
+		default:
+		}
+		if containsAction(input.AllowedActions, "check") {
+			return ai.Decision{Action: "check", Amount: 0}, nil
+		}
+		if containsAction(input.AllowedActions, "call") {
+			return ai.Decision{Action: "call", Amount: 0}, nil
+		}
+		if containsAction(input.AllowedActions, "fold") {
+			return ai.Decision{Action: "fold", Amount: 0}, nil
+		}
+		return ai.Decision{Action: "allin", Amount: 0}, nil
+	}
+
+	s := NewMemoryStore(Options{AI: stub})
+	owner := s.CreateSession("owner")
+	guest := s.CreateSession("guest")
+	room := s.CreateRoom(owner, "room", 10, 10)
+	if _, err := s.JoinRoom(room.RoomID, guest); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.StartGame(room.RoomID, owner.UserID); err != nil {
+		t.Fatal(err)
+	}
+
+	r, ok := s.GetRoom(room.RoomID)
+	if !ok || r == nil || r.Game == nil {
+		t.Fatalf("room/game missing")
+	}
+	turn := r.Game.Players[r.Game.TurnPos]
+	if turn.IsAI {
+		t.Fatalf("expected human turn player")
+	}
+	managedRoom, err := s.SetPlayerAIManaged(room.RoomID, turn.UserID, true)
+	if err != nil {
+		t.Fatalf("enable ai managed failed: %v", err)
+	}
+	startVersion := managedRoom.StateVersion
+
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		select {
+		case <-decisionCalled:
+		default:
+		}
+
+		latest, ok := s.GetRoom(room.RoomID)
+		if !ok || latest == nil || latest.Game == nil {
+			t.Fatalf("room/game missing while waiting ai action")
+		}
+		acted := false
+		for _, gp := range latest.Game.Players {
+			if gp.UserID == turn.UserID {
+				acted = gp.LastAction != ""
+				break
+			}
+		}
+		if latest.StateVersion > startVersion && acted {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("ai did not act for managed player in time: version=%d startVersion=%d", latest.StateVersion, startVersion)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
 func TestStore_NoHumansRoomDeletedEvenWithAIs(t *testing.T) {
 	s := NewMemoryStore()
 	owner := s.CreateSession("owner")

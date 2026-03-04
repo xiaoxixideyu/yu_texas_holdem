@@ -319,7 +319,9 @@ pre {
   align-items: center;
   gap: 6px;
 }
-.player-name .badge {
+.badge {
+  display: inline-flex;
+  align-items: center;
   font-size: .7rem;
   padding: 1px 6px;
   border-radius: 4px;
@@ -332,6 +334,7 @@ pre {
 .badge-sb { background: #5b9bd5; color: #fff; }
 .badge-bb { background: #e67e22; color: #fff; }
 .badge-ai { background: #8b5cf6; color: #fff; }
+.badge-ai-managed { background: #0ea5e9; color: #fff; }
 
 .player-details { color: var(--text-muted); font-size: .82rem; }
 .player-cards { display: flex; gap: 3px; flex-shrink: 0; }

@@ -30,6 +30,7 @@ type gamePlayerView struct {
 	UserID       string         `json:"userId"`
 	Username     string         `json:"username"`
 	IsAI         bool           `json:"isAi"`
+	AIManaged    bool           `json:"aiManaged"`
 	SeatIndex    int            `json:"seatIndex"`
 	Stack        int            `json:"stack"`
 	Folded       bool           `json:"folded"`
@@ -208,11 +209,12 @@ func (h *GameHandler) GetState(w http.ResponseWriter, r *http.Request, s *store.
 	roomPlayers := make([]map[string]any, 0, len(room.Players))
 	for _, p := range room.Players {
 		roomPlayers = append(roomPlayers, map[string]any{
-			"userId":   p.UserID,
-			"username": p.Username,
-			"seat":     p.Seat,
-			"stack":    p.Stack,
-			"isAi":     p.IsAI,
+			"userId":    p.UserID,
+			"username":  p.Username,
+			"seat":      p.Seat,
+			"stack":     p.Stack,
+			"isAi":      p.IsAI,
+			"aiManaged": p.AIManaged,
 		})
 	}
 
@@ -244,7 +246,7 @@ func (h *GameHandler) GetState(w http.ResponseWriter, r *http.Request, s *store.
 		callAmount := 0
 		minBet := 0
 		minRaise := 0
-		if isPlayer && isTurn && !p.Folded {
+		if isPlayer && isTurn && !p.Folded && !p.AIManaged {
 			diff := room.Game.RoundBet - p.RoundContrib
 			canCheck = diff == 0
 			canCall = diff > 0 && p.Stack >= diff
@@ -269,6 +271,7 @@ func (h *GameHandler) GetState(w http.ResponseWriter, r *http.Request, s *store.
 			UserID:       p.UserID,
 			Username:     p.Username,
 			IsAI:         p.IsAI,
+			AIManaged:    p.AIManaged,
 			SeatIndex:    p.SeatIndex,
 			Stack:        p.Stack,
 			Folded:       p.Folded,

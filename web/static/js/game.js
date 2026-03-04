@@ -242,6 +242,21 @@ function updateActionButtons(data) {
     return;
   }
 
+  if (me.aiManaged) {
+    Object.values(buttons).forEach((btn) => {
+      if (!btn) return;
+      btn.disabled = true;
+      btn.title = "AI托管中，当前不可手动操作";
+    });
+    if (betAmountInput) {
+      betAmountInput.disabled = true;
+      betAmountInput.placeholder = "AI托管中";
+    }
+    if (callAmountLabel) callAmountLabel.textContent = "";
+    if (actionHint) actionHint.textContent = "你已开启AI托管，当前由AI自动操作。";
+    return;
+  }
+
   const canAllIn = !!(me.isTurn && !me.folded && typeof me.stack === "number" && me.stack > 0);
 
   buttons.check.disabled = !me.canCheck;
@@ -293,6 +308,10 @@ function updateActionButtons(data) {
 
 function aiBadge(isAi) {
   return isAi ? '<span class="badge badge-ai">AI</span>' : "";
+}
+
+function aiManagedBadge(isAIManaged) {
+  return isAIManaged ? '<span class="badge badge-ai-managed">AI托管中</span>' : "";
 }
 
 function renderAIList(data) {
@@ -352,6 +371,33 @@ function updateOwnerActions(data) {
   renderAIList(data);
 }
 
+function updateAIManagedButton(data) {
+  const btn = document.getElementById("btn-ai-managed");
+  if (!btn) return;
+
+  if (isSpectatorMode()) {
+    btn.style.display = "none";
+    btn.disabled = true;
+    btn.dataset.enabled = "0";
+    return;
+  }
+
+  const me = (data.roomPlayers || []).find((p) => p.userId === currentUserId);
+  if (!me || me.isAi) {
+    btn.style.display = "none";
+    btn.disabled = true;
+    btn.dataset.enabled = "0";
+    return;
+  }
+
+  const enabled = !!me.aiManaged;
+  btn.style.display = "inline-block";
+  btn.disabled = false;
+  btn.dataset.enabled = enabled ? "1" : "0";
+  btn.textContent = enabled ? "取消AI托管" : "AI托管";
+  btn.title = enabled ? "点击后恢复手动操作" : "开启后由 AI 自动执行你的回合动作";
+}
+
 function updateMyStack(data) {
   const el = document.getElementById("my-stack");
   if (!el) return;
@@ -401,6 +447,7 @@ function renderWaitingPlayers(data) {
             ${p.username}
             ${p.userId === data.ownerUserId ? '<span class="badge badge-owner">房主</span>' : ""}
             ${aiBadge(p.isAi)}
+            ${aiManagedBadge(p.aiManaged)}
           </div>
           <div class="player-details">座位 ${p.seat} · 筹码 ${typeof p.stack === "number" ? p.stack : "-"}</div>
         </div>
@@ -425,6 +472,7 @@ function renderState(data) {
     renderActiveQuickChatBubbles();
     updateMyStack(data);
     updateOwnerActions(data);
+    updateAIManagedButton(data);
     updateRevealControls(data);
     updateActionButtons(data);
     renderHandLog(data);
@@ -474,6 +522,7 @@ function renderState(data) {
       if (isTurn) badges.push('<span class="badge badge-turn">行动中</span>');
       if (isFolded) badges.push('<span class="badge badge-folded">已弃牌</span>');
       if (p.isAi) badges.push('<span class="badge badge-ai">AI</span>');
+      if (p.aiManaged) badges.push('<span class="badge badge-ai-managed">AI托管中</span>');
 
       const holeCardsHtml = (p.holeCards || []).length
         ? p.holeCards.map((c) => cardHtml(c)).join("")
@@ -498,6 +547,7 @@ function renderState(data) {
   updateRevealControls(data);
   updateMyStack(data);
   updateOwnerActions(data);
+  updateAIManagedButton(data);
   updateActionButtons(data);
   renderHandLog(data);
 }
@@ -961,6 +1011,26 @@ async function addAI() {
   }
 }
 
+async function toggleAIManaged() {
+  if (isSpectatorMode()) {
+    logLine("观战模式不可切换AI托管");
+    return;
+  }
+  const btn = document.getElementById("btn-ai-managed");
+  if (!btn) return;
+  const nextEnabled = btn.dataset.enabled !== "1";
+  try {
+    await api(`/api/v1/rooms/${roomId}/ai-managed`, {
+      method: "POST",
+      body: { enabled: nextEnabled },
+    });
+    logLine(nextEnabled ? "已开启AI托管" : "已取消AI托管");
+    await loadState();
+  } catch (err) {
+    logLine(`切换AI托管失败：${err.message}`);
+  }
+}
+
 window.removeAI = async function removeAI(aiUserId) {
   if (!aiUserId) return;
   if (isSpectatorMode()) {
@@ -1007,11 +1077,14 @@ function resetPolling(ms) {
 
   document.getElementById("btn-start-game").addEventListener("click", startGame);
   document.getElementById("btn-next-hand").addEventListener("click", nextHand);
+  const btnAIManaged = document.getElementById("btn-ai-managed");
+  if (btnAIManaged) btnAIManaged.addEventListener("click", toggleAIManaged);
   document.getElementById("btn-leave-room").addEventListener("click", leaveRoom);
   const btnAddAI = document.getElementById("btn-add-ai");
   if (btnAddAI) btnAddAI.addEventListener("click", addAI);
   document.getElementById("btn-start-game").style.display = "none";
   document.getElementById("btn-next-hand").style.display = "none";
+  if (btnAIManaged) btnAIManaged.style.display = "none";
 
   await initQuickChatConfig();
   resetQuickChatPolling();

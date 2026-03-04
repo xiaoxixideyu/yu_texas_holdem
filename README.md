@@ -55,10 +55,13 @@ go run ./cmd/server
 - AI 与真人一样走 `ApplyAction` 版本链路（`expectedVersion/stateVersion`）
 - AI 的 LLM 调用在锁外执行，锁内仅快照/校验/提交
 - AI 回合自动行动；模型输出非法时按兜底策略 `check > call > fold`
+- 真人玩家可开启/取消 `AI托管`（开启后由 AI 自动代打，手动下注类操作会被禁用）
 - 每手结束（正常结束 + leave 强制结束）写入 AI 复盘与对手画像
 - `state` 中可见：
   - `roomPlayers[].isAi`
+  - `roomPlayers[].aiManaged`
   - `game.players[].isAi`
+  - `game.players[].aiManaged`
   - `aiMemory`
 - 当房间无真人玩家时自动删房（即使仍有 AI）
 
@@ -234,10 +237,28 @@ go run ./cmd/server
 
 响应包含：
 - `roomPlayers[].isAi`
+- `roomPlayers[].aiManaged`
 - `game.players[].isAi`
+- `game.players[].aiManaged`
 - `aiMemory`
 
-### 12) 提交动作
+### 12) 切换 AI 托管（当前玩家）
+
+`POST /api/v1/rooms/{roomId}/ai-managed`
+
+请求：
+```json
+{
+  "enabled": true
+}
+```
+
+说明：
+- 仅房间内真人玩家可切换自己
+- `enabled=true` 需要服务端 AI 已启用
+- 托管开启后，`check/call/bet/allin/fold` 等手动动作会被拒绝
+
+### 13) 提交动作
 
 `POST /api/v1/rooms/{roomId}/actions`
 

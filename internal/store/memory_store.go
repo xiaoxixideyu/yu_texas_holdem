@@ -115,11 +115,12 @@ type RoomAIMemory struct {
 }
 
 type RoomPlayer struct {
-	UserID   string `json:"userId"`
-	Username string `json:"username"`
-	Seat     int    `json:"seat"`
-	Stack    int    `json:"stack"`
-	IsAI     bool   `json:"isAi"`
+	UserID    string `json:"userId"`
+	Username  string `json:"username"`
+	Seat      int    `json:"seat"`
+	Stack     int    `json:"stack"`
+	IsAI      bool   `json:"isAi"`
+	AIManaged bool   `json:"aiManaged"`
 }
 
 type RoomSpectator struct {
@@ -289,7 +290,7 @@ func (m *MemoryStore) CreateRoom(owner *Session, name string, openBetMin int, be
 		BetMin:               betMin,
 		OwnerUserID:          owner.UserID,
 		Status:               RoomWaiting,
-		Players:              []RoomPlayer{{UserID: owner.UserID, Username: owner.Username, Seat: 0, Stack: 10000, IsAI: false}},
+		Players:              []RoomPlayer{{UserID: owner.UserID, Username: owner.Username, Seat: 0, Stack: 10000, IsAI: false, AIManaged: false}},
 		Spectators:           []RoomSpectator{},
 		StateVersion:         1,
 		UpdatedAtUnix:        time.Now().Unix(),
@@ -328,7 +329,7 @@ func (m *MemoryStore) JoinRoom(roomID string, s *Session) (*Room, error) {
 	if idx := spectatorIndex(r, s.UserID); idx >= 0 {
 		r.Spectators = append(r.Spectators[:idx], r.Spectators[idx+1:]...)
 	}
-	r.Players = append(r.Players, RoomPlayer{UserID: s.UserID, Username: s.Username, Seat: len(r.Players), Stack: 10000, IsAI: false})
+	r.Players = append(r.Players, RoomPlayer{UserID: s.UserID, Username: s.Username, Seat: len(r.Players), Stack: 10000, IsAI: false, AIManaged: false})
 	r.StateVersion++
 	r.UpdatedAtUnix = time.Now().Unix()
 	m.roomsVersion++
@@ -379,11 +380,12 @@ func (m *MemoryStore) AddAI(roomID, ownerUserID, name string) (*Room, *RoomPlaye
 		aiName = fmt.Sprintf("Bot %d", len(r.Players)+1)
 	}
 	aiPlayer := RoomPlayer{
-		UserID:   m.newAIUserID(),
-		Username: aiName,
-		Seat:     len(r.Players),
-		Stack:    10000,
-		IsAI:     true,
+		UserID:    m.newAIUserID(),
+		Username:  aiName,
+		Seat:      len(r.Players),
+		Stack:     10000,
+		IsAI:      true,
+		AIManaged: false,
 	}
 	r.Players = append(r.Players, aiPlayer)
 	r.AIMemory[aiPlayer.UserID] = &RoomAIMemory{HandSummaries: []string{}, OpponentProfiles: map[string]*OpponentProfile{}}
@@ -430,6 +432,47 @@ func (m *MemoryStore) RemoveAI(roomID, ownerUserID, aiUserID string) (*Room, err
 	r.StateVersion++
 	r.UpdatedAtUnix = time.Now().Unix()
 	m.roomsVersion++
+	return r, nil
+}
+
+func (m *MemoryStore) SetPlayerAIManaged(roomID, userID string, enabled bool) (*Room, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	r, ok := m.rooms[roomID]
+	if !ok {
+		return nil, errors.New("room not found")
+	}
+	if isSpectator(r, userID) {
+		return nil, errors.New("spectator is read-only")
+	}
+	idx := playerIndex(r, userID)
+	if idx < 0 {
+		return nil, errors.New("user not in room")
+	}
+	if r.Players[idx].IsAI {
+		return nil, errors.New("ai player cannot toggle ai managed")
+	}
+	if enabled && !m.aiService.Enabled() {
+		return nil, errors.New("ai service disabled")
+	}
+	if r.Players[idx].AIManaged == enabled {
+		return r, nil
+	}
+
+	r.Players[idx].AIManaged = enabled
+	if r.Game != nil {
+		for _, gp := range r.Game.Players {
+			if gp.UserID == userID {
+				gp.AIManaged = enabled
+				break
+			}
+		}
+	}
+	r.StateVersion++
+	r.UpdatedAtUnix = time.Now().Unix()
+	m.roomsVersion++
+	m.enqueueAIDecisionLocked(r)
 	return r, nil
 }
 
@@ -529,6 +572,7 @@ func (m *MemoryStore) buildGameFromRoom(r *Room, stacks map[string]int) (*domain
 			UserID:    p.UserID,
 			Username:  p.Username,
 			IsAI:      p.IsAI,
+			AIManaged: p.AIManaged,
 			SeatIndex: p.Seat,
 			Stack:     stack,
 		})
@@ -738,6 +782,10 @@ func (m *MemoryStore) NextHand(roomID, userID string) (*Room, error) {
 }
 
 func (m *MemoryStore) ApplyAction(roomID, userID, actionID, action string, amount int, expectedVersion int64) (*Room, error) {
+	return m.applyAction(roomID, userID, actionID, action, amount, expectedVersion, false)
+}
+
+func (m *MemoryStore) applyAction(roomID, userID, actionID, action string, amount int, expectedVersion int64, allowAIManaged bool) (*Room, error) {
 	m.mu.Lock()
 	r, ok := m.rooms[roomID]
 	if !ok {
@@ -763,6 +811,15 @@ func (m *MemoryStore) ApplyAction(roomID, userID, actionID, action string, amoun
 	if actionID != "" && r.ActionSeen[actionID] {
 		m.mu.Unlock()
 		return r, nil
+	}
+	for _, gp := range r.Game.Players {
+		if gp.UserID == userID {
+			if gp.AIManaged && !allowAIManaged {
+				m.mu.Unlock()
+				return nil, errors.New("player is ai-managed")
+			}
+			break
+		}
 	}
 	if err := r.Game.ApplyAction(userID, action, amount); err != nil {
 		m.mu.Unlock()
@@ -799,7 +856,7 @@ func (m *MemoryStore) applyActionFromAI(task *aiDecisionTask, decision ai.Decisi
 	delete(m.aiWorkers, task.RoomID)
 	m.mu.Unlock()
 
-	_, err := m.ApplyAction(task.RoomID, task.AIUserID, task.ActionID, decision.Action, decision.Amount, task.ExpectedVersion)
+	_, err := m.applyAction(task.RoomID, task.AIUserID, task.ActionID, decision.Action, decision.Amount, task.ExpectedVersion, true)
 	if err == nil {
 		return
 	}
@@ -1511,7 +1568,7 @@ func (m *MemoryStore) enqueueAIDecisionLockedWithRetry(room *Room, retriesLeft i
 		return
 	}
 	turn := room.Game.Players[room.Game.TurnPos]
-	if !turn.IsAI {
+	if !turn.IsAI && !turn.AIManaged {
 		return
 	}
 	allowed, callAmount, minBet, minRaise := allowedActionsForPlayer(room.Game, turn)

@@ -70,6 +70,8 @@ func main() {
 				return
 			}
 			w.WriteHeader(http.StatusMethodNotAllowed)
+		case "ai-managed":
+			roomH.ToggleAIManaged(w, r, s)
 		case "state":
 			gameH.GetState(w, r, s)
 		case "actions":
