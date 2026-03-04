@@ -360,6 +360,150 @@ func TestStore_NoHumansRoomDeletedEvenWithAIs(t *testing.T) {
 	}
 }
 
+func TestStore_AITurnInputContainsHoleCardsWithoutOpponentsCards(t *testing.T) {
+	captured := make(chan ai.DecisionInput, 1)
+	stub := &stubAIService{}
+	stub.decisionFn = func(_ context.Context, input ai.DecisionInput) (ai.Decision, error) {
+		select {
+		case captured <- input:
+		default:
+		}
+		if containsAction(input.AllowedActions, "check") {
+			return ai.Decision{Action: "check", Amount: 0}, nil
+		}
+		if containsAction(input.AllowedActions, "call") {
+			return ai.Decision{Action: "call", Amount: 0}, nil
+		}
+		if containsAction(input.AllowedActions, "fold") {
+			return ai.Decision{Action: "fold", Amount: 0}, nil
+		}
+		if containsAction(input.AllowedActions, "allin") {
+			return ai.Decision{Action: "allin", Amount: 0}, nil
+		}
+		return ai.Decision{Action: "check", Amount: 0}, nil
+	}
+
+	s := NewMemoryStore(Options{AI: stub})
+	owner := s.CreateSession("owner")
+	room := s.CreateRoom(owner, "room", 10, 10)
+	if _, _, err := s.AddAI(room.RoomID, owner.UserID, "bot"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.StartGame(room.RoomID, owner.UserID); err != nil {
+		t.Fatal(err)
+	}
+
+	r, ok := s.GetRoom(room.RoomID)
+	if !ok || r == nil || r.Game == nil {
+		t.Fatalf("room/game missing")
+	}
+	for i := 0; i < 8; i++ {
+		r, ok = s.GetRoom(room.RoomID)
+		if !ok || r == nil || r.Game == nil {
+			t.Fatalf("room/game missing")
+		}
+		if r.Game.Players[r.Game.TurnPos].IsAI {
+			break
+		}
+		turn := r.Game.Players[r.Game.TurnPos]
+		action := "check"
+		if r.Game.RoundBet-turn.RoundContrib > 0 {
+			action = "call"
+		}
+		if _, err := s.ApplyAction(room.RoomID, turn.UserID, "advance-to-ai-"+time.Now().Format("150405.000000"), action, 0, r.StateVersion); err != nil {
+			t.Fatalf("failed to advance to ai turn: %v", err)
+		}
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		select {
+		case input := <-captured:
+			if len(input.HoleCards) != 2 {
+				t.Fatalf("expected ai hole cards length 2, got %d", len(input.HoleCards))
+			}
+			if input.PreflopTier == "" {
+				t.Fatalf("expected preflop tier set")
+			}
+			if input.MadeHandStrength == "" {
+				t.Fatalf("expected made hand strength set")
+			}
+			if len(input.DrawFlags) == 0 {
+				t.Fatalf("expected draw flags set")
+			}
+			r, ok := s.GetRoom(room.RoomID)
+			if !ok || r == nil || r.Game == nil {
+				t.Fatalf("room/game missing")
+			}
+			for _, gp := range r.Game.Players {
+				if gp.UserID == input.AIUserID {
+					continue
+				}
+				for _, card := range gp.HoleCards {
+					cardText := cardToText(card)
+					for _, seen := range input.HoleCards {
+						if seen == cardText {
+							t.Fatalf("opponent hole card leaked into input: %s", cardText)
+						}
+					}
+				}
+			}
+			return
+		default:
+			if time.Now().After(deadline) {
+				t.Fatalf("did not capture ai decision input in time")
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+}
+
+func TestStore_FallbackDecision_StrongHandBetsWhenAllowed(t *testing.T) {
+	decision := fallbackDecision(ai.DecisionInput{
+		AllowedActions:   []string{"bet", "check", "fold"},
+		RoundBet:         10,
+		MinBet:           20,
+		MinRaise:         30,
+		Stack:            120,
+		Pot:              100,
+		CallAmount:       10,
+		MadeHandStrength: "monster",
+		DrawFlags:        []string{"none"},
+	})
+	if decision.Action != "bet" {
+		t.Fatalf("expected bet for monster hand, got %s", decision.Action)
+	}
+	if decision.Amount < 30 {
+		t.Fatalf("expected bet amount >= minRaise, got %d", decision.Amount)
+	}
+	if decision.Amount > 120 {
+		t.Fatalf("expected bet amount <= stack, got %d", decision.Amount)
+	}
+}
+
+func TestStore_FallbackDecision_BetAmountWithinStackAndMin(t *testing.T) {
+	decision := fallbackDecision(ai.DecisionInput{
+		AllowedActions:   []string{"bet", "fold"},
+		RoundBet:         0,
+		MinBet:           40,
+		MinRaise:         0,
+		Stack:            45,
+		Pot:              20,
+		CallAmount:       0,
+		MadeHandStrength: "strong",
+		DrawFlags:        []string{"none"},
+	})
+	if decision.Action != "bet" {
+		t.Fatalf("expected bet action, got %s", decision.Action)
+	}
+	if decision.Amount < 40 {
+		t.Fatalf("expected bet amount >= minBet, got %d", decision.Amount)
+	}
+	if decision.Amount > 45 {
+		t.Fatalf("expected bet amount <= stack, got %d", decision.Amount)
+	}
+}
+
 func TestStore_AITurnAutoActionWithFallbackAndSummary(t *testing.T) {
 	stub := &stubAIService{}
 	stub.decisionFn = func(_ context.Context, input ai.DecisionInput) (ai.Decision, error) {
@@ -531,4 +675,13 @@ func TestStore_SummaryTriggeredOnLeaveFinish(t *testing.T) {
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
+}
+
+func containsAction(actions []string, expected string) bool {
+	for _, action := range actions {
+		if action == expected {
+			return true
+		}
+	}
+	return false
 }

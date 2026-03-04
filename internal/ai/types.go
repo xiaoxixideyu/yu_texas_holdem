@@ -31,26 +31,33 @@ type ActionLog struct {
 }
 
 type DecisionInput struct {
-	RoomID          string             `json:"roomId"`
-	HandID          int64              `json:"handId"`
-	StateVersion    int64              `json:"stateVersion"`
-	AIUserID        string             `json:"aiUserId"`
-	AIUsername      string             `json:"aiUsername"`
-	Stage           string             `json:"stage"`
-	Pot             int                `json:"pot"`
-	RoundBet        int                `json:"roundBet"`
-	OpenBetMin      int                `json:"openBetMin"`
-	BetMin          int                `json:"betMin"`
-	CallAmount      int                `json:"callAmount"`
-	MinBet          int                `json:"minBet"`
-	MinRaise        int                `json:"minRaise"`
-	Stack           int                `json:"stack"`
-	AllowedActions  []string           `json:"allowedActions"`
-	CommunityCards  []string           `json:"communityCards"`
-	Players         []PlayerSnapshot   `json:"players"`
-	RecentActionLog []ActionLog        `json:"recentActionLog"`
-	MemorySummaries []string           `json:"memorySummaries"`
-	Profiles        map[string]Profile `json:"profiles"`
+	RoomID           string             `json:"roomId"`
+	HandID           int64              `json:"handId"`
+	StateVersion     int64              `json:"stateVersion"`
+	AIUserID         string             `json:"aiUserId"`
+	AIUsername       string             `json:"aiUsername"`
+	Stage            string             `json:"stage"`
+	Pot              int                `json:"pot"`
+	RoundBet         int                `json:"roundBet"`
+	OpenBetMin       int                `json:"openBetMin"`
+	BetMin           int                `json:"betMin"`
+	CallAmount       int                `json:"callAmount"`
+	MinBet           int                `json:"minBet"`
+	MinRaise         int                `json:"minRaise"`
+	Stack            int                `json:"stack"`
+	AllowedActions   []string           `json:"allowedActions"`
+	CommunityCards   []string           `json:"communityCards"`
+	HoleCards        []string           `json:"holeCards"`
+	HandCategory     string             `json:"handCategory"`
+	HandCategoryRank int                `json:"handCategoryRank"`
+	HandRanks        []int              `json:"handRanks"`
+	PreflopTier      string             `json:"preflopTier"`
+	MadeHandStrength string             `json:"madeHandStrength"`
+	DrawFlags        []string           `json:"drawFlags"`
+	Players          []PlayerSnapshot   `json:"players"`
+	RecentActionLog  []ActionLog        `json:"recentActionLog"`
+	MemorySummaries  []string           `json:"memorySummaries"`
+	Profiles         map[string]Profile `json:"profiles"`
 }
 
 type Decision struct {

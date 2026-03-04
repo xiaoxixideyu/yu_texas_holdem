@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -998,6 +999,178 @@ func cardToText(card domain.Card) string {
 	return r + s
 }
 
+func preflopTierFromHoleCards(hole []domain.Card) string {
+	if len(hole) < 2 {
+		return "unknown"
+	}
+	first := hole[0]
+	second := hole[1]
+	high := first.Rank
+	low := second.Rank
+	if low > high {
+		high, low = low, high
+	}
+	isPair := first.Rank == second.Rank
+	isSuited := first.Suit == second.Suit
+	gap := high - low
+	if isPair {
+		switch {
+		case high >= 12:
+			return "premium"
+		case high >= 9:
+			return "strong"
+		case high >= 6:
+			return "playable"
+		default:
+			return "speculative"
+		}
+	}
+	if high == 14 && low >= 10 {
+		if isSuited {
+			return "premium"
+		}
+		return "strong"
+	}
+	if isSuited && gap <= 1 && high >= 10 {
+		return "strong"
+	}
+	if (high >= 13 && low >= 10) || (isSuited && gap <= 2 && high >= 9) {
+		return "playable"
+	}
+	if isSuited || gap <= 2 || high >= 12 {
+		return "speculative"
+	}
+	return "trash"
+}
+
+func madeHandStrengthFromCategory(category int) string {
+	switch {
+	case category >= 6:
+		return "monster"
+	case category >= 4:
+		return "strong"
+	case category >= 2:
+		return "medium"
+	case category == 1:
+		return "weak"
+	default:
+		return "none"
+	}
+}
+
+func hasFlushDraw(hole []domain.Card, board []domain.Card) bool {
+	all := append(append([]domain.Card{}, hole...), board...)
+	if len(all) < 4 {
+		return false
+	}
+	suitCount := map[domain.Suit]int{}
+	for _, c := range all {
+		suitCount[c.Suit]++
+	}
+	for _, count := range suitCount {
+		if count >= 4 {
+			return true
+		}
+	}
+	return false
+}
+
+func hasOpenEndedStraightDraw(hole []domain.Card, board []domain.Card) bool {
+	all := append(append([]domain.Card{}, hole...), board...)
+	if len(all) < 4 {
+		return false
+	}
+	rankMap := map[int]bool{}
+	for _, c := range all {
+		rankMap[c.Rank] = true
+		if c.Rank == 14 {
+			rankMap[1] = true
+		}
+	}
+	ranks := make([]int, 0, len(rankMap))
+	for rank := range rankMap {
+		ranks = append(ranks, rank)
+	}
+	sort.Ints(ranks)
+	if len(ranks) < 4 {
+		return false
+	}
+	for i := 0; i <= len(ranks)-4; i++ {
+		window := ranks[i : i+4]
+		if window[3]-window[0] != 3 {
+			continue
+		}
+		if window[1] != window[0]+1 || window[2] != window[1]+1 || window[3] != window[2]+1 {
+			continue
+		}
+		if rankMap[window[0]-1] || rankMap[window[3]+1] {
+			return true
+		}
+	}
+	return false
+}
+
+func hasGutshotStraightDraw(hole []domain.Card, board []domain.Card) bool {
+	all := append(append([]domain.Card{}, hole...), board...)
+	if len(all) < 4 {
+		return false
+	}
+	rankMap := map[int]bool{}
+	for _, c := range all {
+		rankMap[c.Rank] = true
+		if c.Rank == 14 {
+			rankMap[1] = true
+		}
+	}
+	for high := 5; high <= 14; high++ {
+		present := 0
+		missing := 0
+		for rank := high - 4; rank <= high; rank++ {
+			if rankMap[rank] {
+				present++
+			} else {
+				missing++
+			}
+		}
+		if present == 4 && missing == 1 {
+			if (rankMap[high-4] && rankMap[high-3] && rankMap[high-2] && rankMap[high-1]) ||
+				(rankMap[high-3] && rankMap[high-2] && rankMap[high-1] && rankMap[high]) {
+				continue
+			}
+			return true
+		}
+	}
+	return false
+}
+
+func buildHandStrengthFeatures(hole []domain.Card, board []domain.Card) (string, int, []int, string, string, []string) {
+	category := ""
+	categoryRank := -1
+	ranks := []int{}
+	madeStrength := "none"
+	draws := []string{}
+	if len(hole)+len(board) >= 5 {
+		cards := append(append([]domain.Card{}, board...), hole...)
+		best, _, name := domain.BestOfSeven(cards)
+		category = name
+		categoryRank = best.Category
+		ranks = append([]int(nil), best.Ranks...)
+		madeStrength = madeHandStrengthFromCategory(best.Category)
+	}
+	if hasFlushDraw(hole, board) {
+		draws = append(draws, "flush_draw")
+	}
+	if hasOpenEndedStraightDraw(hole, board) {
+		draws = append(draws, "open_ended_straight_draw")
+	} else if hasGutshotStraightDraw(hole, board) {
+		draws = append(draws, "gutshot")
+	}
+	if len(draws) == 0 {
+		draws = []string{"none"}
+	}
+	return category, categoryRank, ranks, preflopTierFromHoleCards(hole), madeStrength, draws
+}
+
 func cloneProfiles(mem map[string]*OpponentProfile) map[string]ai.Profile {
 	out := map[string]ai.Profile{}
 	for uid, profile := range mem {
@@ -1029,6 +1202,112 @@ func fallbackDecision(input ai.DecisionInput) ai.Decision {
 	for _, a := range input.AllowedActions {
 		allowed[strings.ToLower(a)] = true
 	}
+	betMin := input.MinBet
+	if input.RoundBet > 0 {
+		betMin = input.MinRaise
+	}
+	if betMin <= 0 {
+		betMin = 1
+	}
+	clampBet := func(amount int) int {
+		if amount < betMin {
+			amount = betMin
+		}
+		if amount > input.Stack {
+			amount = input.Stack
+		}
+		return amount
+	}
+	canBet := allowed["bet"] && input.Stack >= betMin
+	isStrongDraw := false
+	for _, draw := range input.DrawFlags {
+		if draw == "flush_draw" || draw == "open_ended_straight_draw" {
+			isStrongDraw = true
+			break
+		}
+	}
+
+	if input.MadeHandStrength == "monster" || input.MadeHandStrength == "strong" {
+		if canBet {
+			target := betMin
+			if input.MadeHandStrength == "monster" {
+				target = input.Pot*3/4 + input.CallAmount
+			} else {
+				target = input.Pot/2 + input.CallAmount
+			}
+			return ai.Decision{Action: "bet", Amount: clampBet(target)}
+		}
+		if allowed["allin"] {
+			return ai.Decision{Action: "allin", Amount: 0}
+		}
+		if allowed["call"] {
+			return ai.Decision{Action: "call", Amount: 0}
+		}
+		if allowed["check"] {
+			return ai.Decision{Action: "check", Amount: 0}
+		}
+	}
+
+	if input.Stage == "preflop" {
+		switch input.PreflopTier {
+		case "premium", "strong":
+			if canBet {
+				target := input.Pot/2 + input.CallAmount
+				return ai.Decision{Action: "bet", Amount: clampBet(target)}
+			}
+			if allowed["call"] {
+				return ai.Decision{Action: "call", Amount: 0}
+			}
+			if allowed["check"] {
+				return ai.Decision{Action: "check", Amount: 0}
+			}
+		case "playable", "speculative":
+			if allowed["check"] {
+				return ai.Decision{Action: "check", Amount: 0}
+			}
+			if input.CallAmount <= input.Pot/3 && allowed["call"] {
+				return ai.Decision{Action: "call", Amount: 0}
+			}
+		default:
+			if input.CallAmount > 0 && allowed["fold"] {
+				return ai.Decision{Action: "fold", Amount: 0}
+			}
+		}
+	}
+
+	if isStrongDraw && canBet {
+		target := input.Pot/2 + input.CallAmount
+		return ai.Decision{Action: "bet", Amount: clampBet(target)}
+	}
+
+	pressureHigh := input.CallAmount > input.Pot/2 || input.CallAmount > input.Stack/3
+	if input.MadeHandStrength == "none" || input.MadeHandStrength == "weak" {
+		if pressureHigh && allowed["fold"] {
+			return ai.Decision{Action: "fold", Amount: 0}
+		}
+		if allowed["check"] {
+			return ai.Decision{Action: "check", Amount: 0}
+		}
+		if input.CallAmount <= input.Pot/4 && allowed["call"] {
+			return ai.Decision{Action: "call", Amount: 0}
+		}
+		if allowed["fold"] {
+			return ai.Decision{Action: "fold", Amount: 0}
+		}
+	}
+
+	if input.MadeHandStrength == "medium" {
+		if allowed["check"] {
+			return ai.Decision{Action: "check", Amount: 0}
+		}
+		if !pressureHigh && allowed["call"] {
+			return ai.Decision{Action: "call", Amount: 0}
+		}
+		if allowed["fold"] {
+			return ai.Decision{Action: "fold", Amount: 0}
+		}
+	}
+
 	if allowed["check"] {
 		return ai.Decision{Action: "check", Amount: 0}
 	}
@@ -1041,18 +1320,8 @@ func fallbackDecision(input ai.DecisionInput) ai.Decision {
 	if allowed["allin"] {
 		return ai.Decision{Action: "allin", Amount: 0}
 	}
-	if allowed["bet"] {
-		amount := input.MinBet
-		if input.RoundBet > 0 {
-			amount = input.MinRaise
-		}
-		if amount <= 0 {
-			amount = 1
-		}
-		if amount > input.Stack {
-			amount = input.Stack
-		}
-		return ai.Decision{Action: "bet", Amount: amount}
+	if canBet {
+		return ai.Decision{Action: "bet", Amount: clampBet(betMin)}
 	}
 	return ai.Decision{Action: "fold", Amount: 0}
 }
@@ -1148,27 +1417,39 @@ func (m *MemoryStore) enqueueAIDecisionLockedWithRetry(room *Room, retriesLeft i
 	for _, c := range room.Game.CommunityCards {
 		community = append(community, cardToText(c))
 	}
+	holeCards := make([]string, 0, len(turn.HoleCards))
+	for _, c := range turn.HoleCards {
+		holeCards = append(holeCards, cardToText(c))
+	}
+	handCategory, handCategoryRank, handRanks, preflopTier, madeHandStrength, drawFlags := buildHandStrengthFeatures(turn.HoleCards, room.Game.CommunityCards)
 	input := ai.DecisionInput{
-		RoomID:          room.RoomID,
-		HandID:          room.HandCounter,
-		StateVersion:    room.StateVersion,
-		AIUserID:        turn.UserID,
-		AIUsername:      turn.Username,
-		Stage:           string(room.Game.Stage),
-		Pot:             room.Game.Pot,
-		RoundBet:        room.Game.RoundBet,
-		OpenBetMin:      room.Game.OpenBetMin,
-		BetMin:          room.Game.BetMin,
-		CallAmount:      callAmount,
-		MinBet:          minBet,
-		MinRaise:        minRaise,
-		Stack:           turn.Stack,
-		AllowedActions:  allowed,
-		CommunityCards:  community,
-		Players:         copyPlayers(room, room.Game),
-		RecentActionLog: copyActionLogs(room.Game.ActionLogs),
-		MemorySummaries: append([]string{}, memory.HandSummaries...),
-		Profiles:        cloneProfiles(memory.OpponentProfiles),
+		RoomID:           room.RoomID,
+		HandID:           room.HandCounter,
+		StateVersion:     room.StateVersion,
+		AIUserID:         turn.UserID,
+		AIUsername:       turn.Username,
+		Stage:            string(room.Game.Stage),
+		Pot:              room.Game.Pot,
+		RoundBet:         room.Game.RoundBet,
+		OpenBetMin:       room.Game.OpenBetMin,
+		BetMin:           room.Game.BetMin,
+		CallAmount:       callAmount,
+		MinBet:           minBet,
+		MinRaise:         minRaise,
+		Stack:            turn.Stack,
+		AllowedActions:   allowed,
+		CommunityCards:   community,
+		HoleCards:        holeCards,
+		HandCategory:     handCategory,
+		HandCategoryRank: handCategoryRank,
+		HandRanks:        handRanks,
+		PreflopTier:      preflopTier,
+		MadeHandStrength: madeHandStrength,
+		DrawFlags:        drawFlags,
+		Players:          copyPlayers(room, room.Game),
+		RecentActionLog:  copyActionLogs(room.Game.ActionLogs),
+		MemorySummaries:  append([]string{}, memory.HandSummaries...),
+		Profiles:         cloneProfiles(memory.OpponentProfiles),
 	}
 	fallback := fallbackDecision(input)
 	task := &aiDecisionTask{
