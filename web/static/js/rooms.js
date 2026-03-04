@@ -49,7 +49,10 @@
             <strong>${r.name}</strong>
             <div class="hint">${roomPopulationText(r.players || [])} · ${roomStatusText(r.status)} · 开局≥${r.openBetMin || 10} · 加注≥${r.betMin || 10}</div>
           </div>
-          <button onclick="joinRoom('${r.roomId}')">进入</button>
+          <div class="actions">
+            <button onclick="joinRoom('${r.roomId}')">进入</button>
+            <button class="btn-secondary" onclick="spectateRoom('${r.roomId}')">观战</button>
+          </div>
         </div>
 `
       )
@@ -60,6 +63,15 @@
     try {
       await api(`/api/v1/rooms/${roomId}/join`, { method: "POST", body: {} });
       location.href = `/game.html?roomId=${roomId}`;
+    } catch (err) {
+      alert(err.message);
+    }
+  };
+
+  window.spectateRoom = async function spectateRoom(roomId) {
+    try {
+      await api(`/api/v1/rooms/${roomId}/spectate`, { method: "POST", body: {} });
+      location.href = `/game.html?roomId=${roomId}&mode=spectator`;
     } catch (err) {
       alert(err.message);
     }

@@ -99,6 +99,24 @@ func (h *RoomHandler) JoinRoom(w http.ResponseWriter, r *http.Request, s *store.
 	writeJSON(w, http.StatusOK, room)
 }
 
+func (h *RoomHandler) SpectateRoom(w http.ResponseWriter, r *http.Request, s *store.Session) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	roomID := roomIDFromPath(r.URL.Path)
+	if roomID == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid room id"})
+		return
+	}
+	room, err := h.Store.SpectateRoom(roomID, s)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, room)
+}
+
 func (h *RoomHandler) StartRoom(w http.ResponseWriter, r *http.Request, s *store.Session) {
 	if r.Method != http.MethodPost {
 		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})

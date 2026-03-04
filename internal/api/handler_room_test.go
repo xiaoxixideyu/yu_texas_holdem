@@ -59,3 +59,64 @@ func TestRoomHandler_AddRemoveAIOwnerOnly(t *testing.T) {
 		t.Fatalf("expected owner remove ai success, got %d body=%s", ownerRemoveW.Code, ownerRemoveW.Body.String())
 	}
 }
+
+func TestRoomHandler_SpectateAndLeave(t *testing.T) {
+	ms := store.NewMemoryStore()
+	owner := ms.CreateSession("owner")
+	spectator := ms.CreateSession("spectator")
+	room := ms.CreateRoom(owner, "room", 10, 10)
+	h := &RoomHandler{Store: ms}
+
+	spectateReq := httptest.NewRequest(http.MethodPost, "/api/v1/rooms/"+room.RoomID+"/spectate", strings.NewReader(`{}`))
+	spectateW := httptest.NewRecorder()
+	h.SpectateRoom(spectateW, spectateReq, spectator)
+	if spectateW.Code != http.StatusOK {
+		t.Fatalf("expected spectate success, got %d body=%s", spectateW.Code, spectateW.Body.String())
+	}
+
+	leaveReq := httptest.NewRequest(http.MethodPost, "/api/v1/rooms/"+room.RoomID+"/leave", strings.NewReader(`{}`))
+	leaveW := httptest.NewRecorder()
+	h.LeaveRoom(leaveW, leaveReq, spectator)
+	if leaveW.Code != http.StatusOK {
+		t.Fatalf("expected spectator leave success, got %d body=%s", leaveW.Code, leaveW.Body.String())
+	}
+}
+
+func TestRoomHandler_JoinSpectateIdempotentBehavior(t *testing.T) {
+	ms := store.NewMemoryStore()
+	owner := ms.CreateSession("owner")
+	user := ms.CreateSession("user")
+	room := ms.CreateRoom(owner, "room", 10, 10)
+	h := &RoomHandler{Store: ms}
+
+	spectateReq := httptest.NewRequest(http.MethodPost, "/api/v1/rooms/"+room.RoomID+"/spectate", strings.NewReader(`{}`))
+	spectateW := httptest.NewRecorder()
+	h.SpectateRoom(spectateW, spectateReq, user)
+	if spectateW.Code != http.StatusOK {
+		t.Fatalf("expected spectate success, got %d body=%s", spectateW.Code, spectateW.Body.String())
+	}
+
+	joinReq := httptest.NewRequest(http.MethodPost, "/api/v1/rooms/"+room.RoomID+"/join", strings.NewReader(`{}`))
+	joinW := httptest.NewRecorder()
+	h.JoinRoom(joinW, joinReq, user)
+	if joinW.Code != http.StatusOK {
+		t.Fatalf("expected join success after spectate, got %d body=%s", joinW.Code, joinW.Body.String())
+	}
+
+	r1, _ := ms.GetRoom(room.RoomID)
+	if len(r1.Spectators) != 0 {
+		t.Fatalf("expected spectator removed after join, got %d", len(r1.Spectators))
+	}
+
+	spectateAgainReq := httptest.NewRequest(http.MethodPost, "/api/v1/rooms/"+room.RoomID+"/spectate", strings.NewReader(`{}`))
+	spectateAgainW := httptest.NewRecorder()
+	h.SpectateRoom(spectateAgainW, spectateAgainReq, user)
+	if spectateAgainW.Code != http.StatusOK {
+		t.Fatalf("expected spectate on player to return ok, got %d body=%s", spectateAgainW.Code, spectateAgainW.Body.String())
+	}
+
+	r2, _ := ms.GetRoom(room.RoomID)
+	if len(r2.Spectators) != 0 {
+		t.Fatalf("expected spectator list unchanged for player, got %d", len(r2.Spectators))
+	}
+}

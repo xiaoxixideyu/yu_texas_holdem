@@ -5,6 +5,8 @@ const roomId = qs("roomId");
 if (!roomId) {
   location.href = "/rooms.html";
 }
+const requestedMode = qs("mode");
+let viewerRole = "";
 
 let stateVersion = 0;
 let pollTimer = null;
@@ -135,6 +137,10 @@ function toQuickChatText(phraseId) {
   return QUICK_CHAT_TEXT[phraseId] || phraseId || "";
 }
 
+function isSpectatorMode() {
+  return requestedMode === "spectator" || viewerRole === "spectator";
+}
+
 function renderHandLog(data) {
   const el = document.getElementById("hand-log");
   if (!el) return;
@@ -163,6 +169,16 @@ function updateRevealControls(data) {
   const controls = document.getElementById("reveal-controls");
   const hint = document.getElementById("reveal-hint");
   if (!controls || !hint) return;
+
+  if (isSpectatorMode()) {
+    controls.style.display = "none";
+    hint.style.display = "none";
+    controls.querySelectorAll("button[data-reveal]").forEach((btn) => {
+      btn.disabled = true;
+      btn.classList.remove("is-active");
+    });
+    return;
+  }
 
   const me = getCurrentPlayer(data);
   const canReveal = !!(me && me.canReveal);
@@ -199,6 +215,21 @@ function updateActionButtons(data) {
     btn.title = gameStarted ? "当前不可执行该操作" : "游戏未开始";
   });
   if (betAmountInput) betAmountInput.style.display = gameStarted ? "inline-block" : "none";
+
+  if (isSpectatorMode()) {
+    Object.values(buttons).forEach((btn) => {
+      if (!btn) return;
+      btn.style.display = "none";
+      btn.disabled = true;
+    });
+    if (betAmountInput) {
+      betAmountInput.style.display = "none";
+      betAmountInput.disabled = true;
+    }
+    if (callAmountLabel) callAmountLabel.textContent = "";
+    if (actionHint) actionHint.textContent = "观战模式：仅可查看对局状态。";
+    return;
+  }
 
   if (!gameStarted) {
     if (actionHint) actionHint.textContent = "游戏未开始，暂不可操作。";
@@ -293,6 +324,16 @@ function updateOwnerActions(data) {
   const btnAddAI = document.getElementById("btn-add-ai");
   if (!btnStartGame || !btnNextHand || !hint) return;
 
+  if (isSpectatorMode()) {
+    btnStartGame.style.display = "none";
+    btnNextHand.style.display = "none";
+    hint.style.display = "none";
+    if (aiManager) aiManager.style.display = "none";
+    if (btnAddAI) btnAddAI.disabled = true;
+    renderAIList(data);
+    return;
+  }
+
   const isOwner = data.ownerUserId === currentUserId;
   const isWaiting = data.roomStatus === "waiting" && !data.game;
   const canStartNextHand = !!data.canStartNextHand;
@@ -370,6 +411,8 @@ function renderWaitingPlayers(data) {
 }
 
 function renderState(data) {
+  viewerRole = data.viewerRole || viewerRole;
+  updateQuickChatControls();
   const gameMeta = document.getElementById("game-meta");
   if (!data.game) {
     gameMeta.innerHTML = `
@@ -600,6 +643,29 @@ function setQuickChatFeedback(text, isError = false) {
   feedback.classList.toggle("is-error", !!isError);
 }
 
+function updateQuickChatControls() {
+  const panel = document.getElementById("quick-chat-panel");
+  const controls = document.getElementById("quick-chat-controls");
+  const select = document.getElementById("quick-chat-select");
+  const sendBtn = document.getElementById("quick-chat-send");
+  const summary = panel ? panel.querySelector("summary") : null;
+  if (!panel || !controls || !select || !sendBtn) return;
+
+  if (isSpectatorMode()) {
+    controls.style.display = "none";
+    select.disabled = true;
+    sendBtn.disabled = true;
+    if (summary) summary.textContent = "短句（观战只读）";
+    panel.open = false;
+    return;
+  }
+
+  controls.style.display = "";
+  select.disabled = false;
+  sendBtn.disabled = false;
+  if (summary) summary.textContent = "发送短句";
+}
+
 function renderQuickChatButtons(phrases) {
   const select = document.getElementById("quick-chat-select");
   const sendBtn = document.getElementById("quick-chat-send");
@@ -633,6 +699,7 @@ function renderQuickChatButtons(phrases) {
   select.onchange = () => {
     setQuickChatFeedback("");
   };
+  updateQuickChatControls();
 }
 
 function createLocalQuickChatEvent(phraseId) {
@@ -680,6 +747,10 @@ async function loadQuickChats() {
 }
 
 async function sendQuickChat(phraseId) {
+  if (isSpectatorMode()) {
+    setQuickChatFeedback("观战模式不可发送短句", true);
+    return;
+  }
   if (!phraseId) {
     setQuickChatFeedback("请先选择短句", true);
     return;
@@ -740,6 +811,12 @@ async function initQuickChatConfig() {
       stopPollingAndBackToRooms();
       return;
     }
+    if (err && err.status === 403 && requestedMode === "spectator") {
+      renderQuickChatButtons([]);
+      setQuickChatFeedback("");
+      updateQuickChatControls();
+      return;
+    }
     renderQuickChatButtons([]);
     setQuickChatFeedback(`短句初始化失败：${err.message}`, true);
   }
@@ -759,12 +836,20 @@ async function loadState() {
       stopPollingAndBackToRooms();
       return;
     }
+    if (err && err.status === 403 && requestedMode !== "spectator") {
+      location.href = `/rooms.html?roomId=${encodeURIComponent(roomId)}`;
+      return;
+    }
     console.error(err);
     logLine(`状态拉取失败：${err.message}`);
   }
 }
 
 async function doAction(type) {
+  if (isSpectatorMode()) {
+    logLine("观战模式不可执行操作");
+    return;
+  }
   try {
     const body = {
       actionId: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
@@ -806,6 +891,10 @@ async function doAction(type) {
 }
 
 async function doReveal(mask) {
+  if (isSpectatorMode()) {
+    logLine("观战模式不可设置亮牌");
+    return;
+  }
   try {
     await api(`/api/v1/rooms/${roomId}/actions`, {
       method: "POST",
@@ -828,6 +917,10 @@ async function doReveal(mask) {
 }
 
 async function startGame() {
+  if (isSpectatorMode()) {
+    logLine("观战模式不可开始游戏");
+    return;
+  }
   try {
     await api(`/api/v1/rooms/${roomId}/start`, { method: "POST", body: {} });
     logLine("已开始游戏");
@@ -838,6 +931,10 @@ async function startGame() {
 }
 
 async function nextHand() {
+  if (isSpectatorMode()) {
+    logLine("观战模式不可开始下一局");
+    return;
+  }
   try {
     await api(`/api/v1/rooms/${roomId}/next-hand`, { method: "POST", body: {} });
     logLine("已开始下一局");
@@ -848,6 +945,10 @@ async function nextHand() {
 }
 
 async function addAI() {
+  if (isSpectatorMode()) {
+    logLine("观战模式不可添加 AI");
+    return;
+  }
   const input = document.getElementById("ai-name");
   const name = input ? String(input.value || "").trim() : "";
   try {
@@ -862,6 +963,10 @@ async function addAI() {
 
 window.removeAI = async function removeAI(aiUserId) {
   if (!aiUserId) return;
+  if (isSpectatorMode()) {
+    logLine("观战模式不可移除 AI");
+    return;
+  }
   try {
     await api(`/api/v1/rooms/${roomId}/ai/${encodeURIComponent(aiUserId)}`, { method: "DELETE" });
     logLine("已移除 AI 玩家");

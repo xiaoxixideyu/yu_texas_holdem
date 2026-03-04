@@ -122,17 +122,23 @@ type RoomPlayer struct {
 	IsAI     bool   `json:"isAi"`
 }
 
+type RoomSpectator struct {
+	UserID   string `json:"userId"`
+	Username string `json:"username"`
+}
+
 type Room struct {
-	RoomID               string       `json:"roomId"`
-	Name                 string       `json:"name"`
-	OpenBetMin           int          `json:"openBetMin"`
-	BetMin               int          `json:"betMin"`
-	OwnerUserID          string       `json:"ownerUserId"`
-	Status               RoomStatus   `json:"status"`
-	Players              []RoomPlayer `json:"players"`
-	StateVersion         int64        `json:"stateVersion"`
-	UpdatedAtUnix        int64        `json:"updatedAtUnix"`
-	NextDealerPos        int          `json:"-"`
+	RoomID               string          `json:"roomId"`
+	Name                 string          `json:"name"`
+	OpenBetMin           int             `json:"openBetMin"`
+	BetMin               int             `json:"betMin"`
+	OwnerUserID          string          `json:"ownerUserId"`
+	Status               RoomStatus      `json:"status"`
+	Players              []RoomPlayer    `json:"players"`
+	Spectators           []RoomSpectator `json:"spectators,omitempty"`
+	StateVersion         int64           `json:"stateVersion"`
+	UpdatedAtUnix        int64           `json:"updatedAtUnix"`
+	NextDealerPos        int             `json:"-"`
 	Game                 *domain.GameState
 	ActionSeen           map[string]bool
 	QuickChats           []QuickChatEvent
@@ -284,6 +290,7 @@ func (m *MemoryStore) CreateRoom(owner *Session, name string, openBetMin int, be
 		OwnerUserID:          owner.UserID,
 		Status:               RoomWaiting,
 		Players:              []RoomPlayer{{UserID: owner.UserID, Username: owner.Username, Seat: 0, Stack: 10000, IsAI: false}},
+		Spectators:           []RoomSpectator{},
 		StateVersion:         1,
 		UpdatedAtUnix:        time.Now().Unix(),
 		NextDealerPos:        0,
@@ -312,15 +319,36 @@ func (m *MemoryStore) JoinRoom(roomID string, s *Session) (*Room, error) {
 	if !ok {
 		return nil, errors.New("room not found")
 	}
-	for _, p := range r.Players {
-		if p.UserID == s.UserID {
-			return r, nil
-		}
+	if isPlayer(r, s.UserID) {
+		return r, nil
 	}
 	if r.Status != RoomWaiting {
 		return nil, errors.New("room already playing")
 	}
+	if idx := spectatorIndex(r, s.UserID); idx >= 0 {
+		r.Spectators = append(r.Spectators[:idx], r.Spectators[idx+1:]...)
+	}
 	r.Players = append(r.Players, RoomPlayer{UserID: s.UserID, Username: s.Username, Seat: len(r.Players), Stack: 10000, IsAI: false})
+	r.StateVersion++
+	r.UpdatedAtUnix = time.Now().Unix()
+	m.roomsVersion++
+	return r, nil
+}
+
+func (m *MemoryStore) SpectateRoom(roomID string, s *Session) (*Room, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	r, ok := m.rooms[roomID]
+	if !ok {
+		return nil, errors.New("room not found")
+	}
+	if isPlayer(r, s.UserID) {
+		return r, nil
+	}
+	if isSpectator(r, s.UserID) {
+		return r, nil
+	}
+	r.Spectators = append(r.Spectators, RoomSpectator{UserID: s.UserID, Username: s.Username})
 	r.StateVersion++
 	r.UpdatedAtUnix = time.Now().Unix()
 	m.roomsVersion++
@@ -333,6 +361,12 @@ func (m *MemoryStore) AddAI(roomID, ownerUserID, name string) (*Room, *RoomPlaye
 	r, ok := m.rooms[roomID]
 	if !ok {
 		return nil, nil, errors.New("room not found")
+	}
+	if isSpectator(r, ownerUserID) {
+		return nil, nil, errors.New("spectator is read-only")
+	}
+	if !isPlayer(r, ownerUserID) {
+		return nil, nil, errors.New("user not in room")
 	}
 	if r.OwnerUserID != ownerUserID {
 		return nil, nil, errors.New("only owner can add ai")
@@ -365,6 +399,12 @@ func (m *MemoryStore) RemoveAI(roomID, ownerUserID, aiUserID string) (*Room, err
 	r, ok := m.rooms[roomID]
 	if !ok {
 		return nil, errors.New("room not found")
+	}
+	if isSpectator(r, ownerUserID) {
+		return nil, errors.New("spectator is read-only")
+	}
+	if !isPlayer(r, ownerUserID) {
+		return nil, errors.New("user not in room")
 	}
 	if r.OwnerUserID != ownerUserID {
 		return nil, errors.New("only owner can remove ai")
@@ -400,6 +440,9 @@ func cloneRoomLocked(r *Room) *Room {
 	copyRoom := *r
 	if r.Players != nil {
 		copyRoom.Players = append([]RoomPlayer(nil), r.Players...)
+	}
+	if r.Spectators != nil {
+		copyRoom.Spectators = append([]RoomSpectator(nil), r.Spectators...)
 	}
 	if r.AIMemory != nil {
 		copyRoom.AIMemory = map[string]*RoomAIMemory{}
@@ -504,6 +547,14 @@ func (m *MemoryStore) StartGame(roomID, userID string) (*Room, error) {
 		m.mu.Unlock()
 		return nil, errors.New("room not found")
 	}
+	if isSpectator(r, userID) {
+		m.mu.Unlock()
+		return nil, errors.New("spectator is read-only")
+	}
+	if !isPlayer(r, userID) {
+		m.mu.Unlock()
+		return nil, errors.New("user not in room")
+	}
 	if r.OwnerUserID != userID {
 		m.mu.Unlock()
 		return nil, errors.New("only owner can start")
@@ -543,16 +594,19 @@ func (m *MemoryStore) LeaveRoom(roomID, userID string) (*Room, error) {
 		m.mu.Unlock()
 		return nil, errors.New("room not found")
 	}
-	idx := -1
-	for i, p := range r.Players {
-		if p.UserID == userID {
-			idx = i
-			break
-		}
-	}
+	idx := playerIndex(r, userID)
 	if idx < 0 {
+		spectatorIdx := spectatorIndex(r, userID)
+		if spectatorIdx < 0 {
+			m.mu.Unlock()
+			return nil, errors.New("user not in room")
+		}
+		r.Spectators = append(r.Spectators[:spectatorIdx], r.Spectators[spectatorIdx+1:]...)
+		r.StateVersion++
+		r.UpdatedAtUnix = time.Now().Unix()
+		m.roomsVersion++
 		m.mu.Unlock()
-		return nil, errors.New("user not in room")
+		return r, nil
 	}
 
 	finishedByLeave := false
@@ -638,6 +692,14 @@ func (m *MemoryStore) NextHand(roomID, userID string) (*Room, error) {
 		m.mu.Unlock()
 		return nil, errors.New("room not found")
 	}
+	if isSpectator(r, userID) {
+		m.mu.Unlock()
+		return nil, errors.New("spectator is read-only")
+	}
+	if !isPlayer(r, userID) {
+		m.mu.Unlock()
+		return nil, errors.New("user not in room")
+	}
 	if r.OwnerUserID != userID {
 		m.mu.Unlock()
 		return nil, errors.New("only owner can start next hand")
@@ -681,6 +743,14 @@ func (m *MemoryStore) ApplyAction(roomID, userID, actionID, action string, amoun
 	if !ok {
 		m.mu.Unlock()
 		return nil, errors.New("room not found")
+	}
+	if isSpectator(r, userID) {
+		m.mu.Unlock()
+		return nil, errors.New("spectator is read-only")
+	}
+	if !isPlayer(r, userID) {
+		m.mu.Unlock()
+		return nil, errors.New("user not in room")
 	}
 	if r.Game == nil || r.Status != RoomPlaying {
 		m.mu.Unlock()
@@ -750,6 +820,12 @@ func (m *MemoryStore) ApplyReveal(roomID, userID, actionID string, mask int, exp
 	r, ok := m.rooms[roomID]
 	if !ok {
 		return nil, errors.New("room not found")
+	}
+	if isSpectator(r, userID) {
+		return nil, errors.New("spectator is read-only")
+	}
+	if !isPlayer(r, userID) {
+		return nil, errors.New("user not in room")
 	}
 	if r.Game == nil {
 		return nil, errors.New("game not started")
@@ -821,6 +897,9 @@ func (m *MemoryStore) SendQuickChat(roomID, userID, actionID, phraseID string) (
 	r, ok := m.rooms[roomID]
 	if !ok {
 		return nil, nil, 0, errors.New("room not found")
+	}
+	if isSpectator(r, userID) {
+		return nil, nil, 0, errors.New("spectator is read-only")
 	}
 	roomPlayer, ok := m.userInRoom(r, userID)
 	if !ok {
@@ -915,11 +994,8 @@ func (m *MemoryStore) LeaveAllRooms(userID string) {
 	m.mu.Lock()
 	var roomIDs []string
 	for rid, r := range m.rooms {
-		for _, p := range r.Players {
-			if p.UserID == userID {
-				roomIDs = append(roomIDs, rid)
-				break
-			}
+		if isMember(r, userID) {
+			roomIDs = append(roomIDs, rid)
 		}
 	}
 	m.mu.Unlock()
@@ -975,6 +1051,36 @@ func firstHumanOwner(players []RoomPlayer) string {
 		}
 	}
 	return ""
+}
+
+func playerIndex(r *Room, userID string) int {
+	for i, p := range r.Players {
+		if p.UserID == userID {
+			return i
+		}
+	}
+	return -1
+}
+
+func spectatorIndex(r *Room, userID string) int {
+	for i, s := range r.Spectators {
+		if s.UserID == userID {
+			return i
+		}
+	}
+	return -1
+}
+
+func isPlayer(r *Room, userID string) bool {
+	return playerIndex(r, userID) >= 0
+}
+
+func isSpectator(r *Room, userID string) bool {
+	return spectatorIndex(r, userID) >= 0
+}
+
+func isMember(r *Room, userID string) bool {
+	return isPlayer(r, userID) || isSpectator(r, userID)
 }
 
 func cardToText(card domain.Card) string {

@@ -52,6 +52,8 @@ func main() {
 		switch action {
 		case "join":
 			roomH.JoinRoom(w, r, s)
+		case "spectate":
+			roomH.SpectateRoom(w, r, s)
 		case "start":
 			roomH.StartRoom(w, r, s)
 		case "leave":

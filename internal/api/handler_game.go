@@ -74,6 +74,14 @@ func (h *GameHandler) GetQuickChats(w http.ResponseWriter, r *http.Request, s *s
 		}
 	}
 	if !inRoom {
+		for _, sp := range room.Spectators {
+			if sp.UserID == s.UserID {
+				inRoom = true
+				break
+			}
+		}
+	}
+	if !inRoom {
 		writeJSON(w, http.StatusForbidden, map[string]any{"error": "user not in room"})
 		return
 	}
@@ -125,7 +133,7 @@ func (h *GameHandler) QuickChat(w http.ResponseWriter, r *http.Request, s *store
 			status = http.StatusTooManyRequests
 			body["retryAfterMs"] = retryAfterMs
 		}
-		if err.Error() == "user not in room" {
+		if err.Error() == "user not in room" || err.Error() == "spectator is read-only" {
 			status = http.StatusForbidden
 		}
 		writeJSON(w, status, body)
@@ -170,6 +178,33 @@ func (h *GameHandler) GetState(w http.ResponseWriter, r *http.Request, s *store.
 		return
 	}
 
+	viewerRole := "spectator"
+	isPlayer := false
+	for _, p := range room.Players {
+		if p.UserID == s.UserID {
+			isPlayer = true
+			if room.OwnerUserID == s.UserID {
+				viewerRole = "owner"
+			} else {
+				viewerRole = "player"
+			}
+			break
+		}
+	}
+	if !isPlayer {
+		isSpectator := false
+		for _, sp := range room.Spectators {
+			if sp.UserID == s.UserID {
+				isSpectator = true
+				break
+			}
+		}
+		if !isSpectator {
+			writeJSON(w, http.StatusForbidden, map[string]any{"error": "user not in room"})
+			return
+		}
+	}
+
 	roomPlayers := make([]map[string]any, 0, len(room.Players))
 	for _, p := range room.Players {
 		roomPlayers = append(roomPlayers, map[string]any{
@@ -190,6 +225,7 @@ func (h *GameHandler) GetState(w http.ResponseWriter, r *http.Request, s *store.
 		"roomPlayers":      roomPlayers,
 		"canStartNextHand": room.OwnerUserID == s.UserID && room.Game != nil && room.Game.Stage == domain.StageFinished,
 		"aiMemory":         room.AIMemory,
+		"viewerRole":       viewerRole,
 	}
 	if room.Game == nil {
 		resp["game"] = nil
@@ -208,7 +244,7 @@ func (h *GameHandler) GetState(w http.ResponseWriter, r *http.Request, s *store.
 		callAmount := 0
 		minBet := 0
 		minRaise := 0
-		if isTurn && !p.Folded {
+		if isPlayer && isTurn && !p.Folded {
 			diff := room.Game.RoundBet - p.RoundContrib
 			canCheck = diff == 0
 			canCall = diff > 0 && p.Stack >= diff
@@ -241,7 +277,7 @@ func (h *GameHandler) GetState(w http.ResponseWriter, r *http.Request, s *store.
 			Contributed:  p.Contributed,
 			BestHandName: p.BestHandName,
 			RevealMask:   p.RevealMask,
-			CanReveal:    p.UserID == s.UserID && room.Game.Stage == domain.StageFinished,
+			CanReveal:    isPlayer && p.UserID == s.UserID && room.Game.Stage == domain.StageFinished,
 			IsTurn:       isTurn,
 			CanCheck:     canCheck,
 			CanCall:      canCall,
@@ -252,7 +288,13 @@ func (h *GameHandler) GetState(w http.ResponseWriter, r *http.Request, s *store.
 			MinBet:       minBet,
 			MinRaise:     minRaise,
 		}
-		if p.UserID == s.UserID {
+		if viewerRole == "spectator" {
+			if room.Game.Stage == domain.StageFinished {
+				pv.HoleCards = visibleHoleCards(p.HoleCards, p.RevealMask)
+			} else {
+				pv.HoleCards = []*domain.Card{nil, nil}
+			}
+		} else if p.UserID == s.UserID {
 			pv.HoleCards = visibleHoleCards(p.HoleCards, 3)
 		} else if room.Game.Stage == domain.StageFinished {
 			pv.HoleCards = visibleHoleCards(p.HoleCards, p.RevealMask)
@@ -310,6 +352,9 @@ func (h *GameHandler) Action(w http.ResponseWriter, r *http.Request, s *store.Se
 		status := http.StatusBadRequest
 		if err.Error() == "version conflict" {
 			status = http.StatusConflict
+		}
+		if err.Error() == "spectator is read-only" || err.Error() == "user not in room" {
+			status = http.StatusForbidden
 		}
 		writeJSON(w, status, map[string]any{"error": err.Error(), "stateVersion": roomVersion(room)})
 		return

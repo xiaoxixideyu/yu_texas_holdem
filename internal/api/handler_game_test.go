@@ -223,6 +223,128 @@ func TestGameHandler_QuickChatForbiddenForNonMember(t *testing.T) {
 	}
 }
 
+func TestGameHandler_SpectatorActionRevealDenied(t *testing.T) {
+	ms := store.NewMemoryStore()
+	owner := ms.CreateSession("owner")
+	guest := ms.CreateSession("guest")
+	spectator := ms.CreateSession("spectator")
+	room := ms.CreateRoom(owner, "room", 10, 10)
+	if _, err := ms.JoinRoom(room.RoomID, guest); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ms.SpectateRoom(room.RoomID, spectator); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ms.StartGame(room.RoomID, owner.UserID); err != nil {
+		t.Fatal(err)
+	}
+	r, _ := ms.GetRoom(room.RoomID)
+
+	h := &GameHandler{Store: ms}
+	actionReq := httptest.NewRequest(http.MethodPost, "/api/v1/rooms/"+room.RoomID+"/actions", strings.NewReader(`{"actionId":"spec-a","type":"check","expectedVersion":`+int64ToString(r.StateVersion)+`} `))
+	actionW := httptest.NewRecorder()
+	h.Action(actionW, actionReq, spectator)
+	if actionW.Code != http.StatusForbidden {
+		t.Fatalf("expected spectator action forbidden, got %d body=%s", actionW.Code, actionW.Body.String())
+	}
+
+	revealReq := httptest.NewRequest(http.MethodPost, "/api/v1/rooms/"+room.RoomID+"/actions", strings.NewReader(`{"actionId":"spec-r","type":"reveal","revealMask":1,"expectedVersion":`+int64ToString(r.StateVersion)+`} `))
+	revealW := httptest.NewRecorder()
+	h.Action(revealW, revealReq, spectator)
+	if revealW.Code != http.StatusForbidden {
+		t.Fatalf("expected spectator reveal forbidden, got %d body=%s", revealW.Code, revealW.Body.String())
+	}
+}
+
+func TestGameHandler_SpectatorHoleCardsVisibility(t *testing.T) {
+	ms := store.NewMemoryStore()
+	owner := ms.CreateSession("owner")
+	guest := ms.CreateSession("guest")
+	spectator := ms.CreateSession("spectator")
+	room := ms.CreateRoom(owner, "room", 10, 10)
+	if _, err := ms.JoinRoom(room.RoomID, guest); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ms.SpectateRoom(room.RoomID, spectator); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ms.StartGame(room.RoomID, owner.UserID); err != nil {
+		t.Fatal(err)
+	}
+
+	h := &GameHandler{Store: ms}
+	reqPlaying := httptest.NewRequest(http.MethodGet, "/api/v1/rooms/"+room.RoomID+"/state", nil)
+	wPlaying := httptest.NewRecorder()
+	h.GetState(wPlaying, reqPlaying, spectator)
+	bodyPlaying := wPlaying.Body.String()
+	if !strings.Contains(bodyPlaying, `"viewerRole":"spectator"`) {
+		t.Fatalf("expected spectator viewerRole, body=%s", bodyPlaying)
+	}
+	if strings.Contains(bodyPlaying, `"holeCards":[{`) {
+		t.Fatalf("spectator should not see any hole card during playing, body=%s", bodyPlaying)
+	}
+
+	r, _ := ms.GetRoom(room.RoomID)
+	turnUser := r.Game.Players[r.Game.TurnPos].UserID
+	if _, err := ms.ApplyAction(room.RoomID, turnUser, "fold-finish", "fold", 0, r.StateVersion); err != nil {
+		t.Fatal(err)
+	}
+	r, _ = ms.GetRoom(room.RoomID)
+	if _, err := ms.ApplyReveal(room.RoomID, guest.UserID, "guest-reveal-mask", 1, r.StateVersion); err != nil {
+		t.Fatal(err)
+	}
+
+	reqFinished := httptest.NewRequest(http.MethodGet, "/api/v1/rooms/"+room.RoomID+"/state", nil)
+	wFinished := httptest.NewRecorder()
+	h.GetState(wFinished, reqFinished, spectator)
+	bodyFinished := wFinished.Body.String()
+	if !strings.Contains(bodyFinished, `"viewerRole":"spectator"`) {
+		t.Fatalf("expected spectator viewerRole finished, body=%s", bodyFinished)
+	}
+	if !strings.Contains(bodyFinished, `"revealMask":1`) {
+		t.Fatalf("expected reveal mask present in finished state, body=%s", bodyFinished)
+	}
+	if !strings.Contains(bodyFinished, `"holeCards":[{`) {
+		t.Fatalf("expected one revealed card visible after finished, body=%s", bodyFinished)
+	}
+}
+
+func TestGameHandler_SpectatorQuickChatReadOnly(t *testing.T) {
+	ms := store.NewMemoryStore()
+	owner := ms.CreateSession("owner")
+	guest := ms.CreateSession("guest")
+	spectator := ms.CreateSession("spectator")
+	room := ms.CreateRoom(owner, "room", 10, 10)
+	if _, err := ms.JoinRoom(room.RoomID, guest); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ms.SpectateRoom(room.RoomID, spectator); err != nil {
+		t.Fatal(err)
+	}
+	h := &GameHandler{Store: ms}
+
+	sendByOwnerReq := httptest.NewRequest(http.MethodPost, "/api/v1/rooms/"+room.RoomID+"/quick-chats", strings.NewReader(`{"actionId":"qc-owner","phraseId":"nh"}`))
+	sendByOwnerW := httptest.NewRecorder()
+	h.QuickChat(sendByOwnerW, sendByOwnerReq, owner)
+	if sendByOwnerW.Code != http.StatusOK {
+		t.Fatalf("expected owner quick chat success, got %d body=%s", sendByOwnerW.Code, sendByOwnerW.Body.String())
+	}
+
+	pollReq := httptest.NewRequest(http.MethodGet, "/api/v1/rooms/"+room.RoomID+"/quick-chats?sinceEventId=0", nil)
+	pollW := httptest.NewRecorder()
+	h.GetQuickChats(pollW, pollReq, spectator)
+	if pollW.Code != http.StatusOK {
+		t.Fatalf("expected spectator quick chat poll success, got %d body=%s", pollW.Code, pollW.Body.String())
+	}
+
+	sendReq := httptest.NewRequest(http.MethodPost, "/api/v1/rooms/"+room.RoomID+"/quick-chats", strings.NewReader(`{"actionId":"qc-spec","phraseId":"gg"}`))
+	sendW := httptest.NewRecorder()
+	h.QuickChat(sendW, sendReq, spectator)
+	if sendW.Code != http.StatusForbidden {
+		t.Fatalf("expected spectator quick chat send forbidden, got %d body=%s", sendW.Code, sendW.Body.String())
+	}
+}
+
 func int64ToString(v int64) string {
 	if v == 0 {
 		return "0"

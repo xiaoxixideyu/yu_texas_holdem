@@ -677,6 +677,122 @@ func TestStore_SummaryTriggeredOnLeaveFinish(t *testing.T) {
 	}
 }
 
+func TestStore_SpectatorJoinIdempotentAndPlayerNoDup(t *testing.T) {
+	s := NewMemoryStore()
+	owner := s.CreateSession("owner")
+	spectator := s.CreateSession("spectator")
+	player := s.CreateSession("player")
+
+	room := s.CreateRoom(owner, "spec", 10, 10)
+	if _, err := s.JoinRoom(room.RoomID, player); err != nil {
+		t.Fatal(err)
+	}
+
+	r1, err := s.SpectateRoom(room.RoomID, spectator)
+	if err != nil {
+		t.Fatalf("spectate failed: %v", err)
+	}
+	if len(r1.Spectators) != 1 {
+		t.Fatalf("expected 1 spectator, got %d", len(r1.Spectators))
+	}
+	v1 := r1.StateVersion
+
+	r2, err := s.SpectateRoom(room.RoomID, spectator)
+	if err != nil {
+		t.Fatalf("spectate idempotent failed: %v", err)
+	}
+	if len(r2.Spectators) != 1 {
+		t.Fatalf("expected 1 spectator after idempotent call, got %d", len(r2.Spectators))
+	}
+	if r2.StateVersion != v1 {
+		t.Fatalf("expected idempotent spectate not bump version, got %d want %d", r2.StateVersion, v1)
+	}
+
+	r3, err := s.SpectateRoom(room.RoomID, player)
+	if err != nil {
+		t.Fatalf("player spectate should no-op: %v", err)
+	}
+	if len(r3.Spectators) != 1 {
+		t.Fatalf("expected spectator list unchanged for player, got %d", len(r3.Spectators))
+	}
+}
+
+func TestStore_SpectatorReadOnlyOperationsDenied(t *testing.T) {
+	s := NewMemoryStore()
+	owner := s.CreateSession("owner")
+	guest := s.CreateSession("guest")
+	spectator := s.CreateSession("spectator")
+
+	room := s.CreateRoom(owner, "spec-ro", 10, 10)
+	if _, err := s.JoinRoom(room.RoomID, guest); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.SpectateRoom(room.RoomID, spectator); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.StartGame(room.RoomID, owner.UserID); err != nil {
+		t.Fatal(err)
+	}
+	r, _ := s.GetRoom(room.RoomID)
+
+	if _, err := s.ApplyAction(room.RoomID, spectator.UserID, "spec-act", "check", 0, r.StateVersion); err == nil || err.Error() != "spectator is read-only" {
+		t.Fatalf("expected spectator action denied, got %v", err)
+	}
+	if _, err := s.ApplyReveal(room.RoomID, spectator.UserID, "spec-reveal", 1, r.StateVersion); err == nil || err.Error() != "spectator is read-only" {
+		t.Fatalf("expected spectator reveal denied, got %v", err)
+	}
+	if _, err := s.NextHand(room.RoomID, spectator.UserID); err == nil || err.Error() != "spectator is read-only" {
+		t.Fatalf("expected spectator next hand denied, got %v", err)
+	}
+	if _, _, err := s.AddAI(room.RoomID, spectator.UserID, "bot"); err == nil || err.Error() != "spectator is read-only" {
+		t.Fatalf("expected spectator add ai denied, got %v", err)
+	}
+	if _, err := s.RemoveAI(room.RoomID, spectator.UserID, "ai-not-found"); err == nil || err.Error() != "spectator is read-only" {
+		t.Fatalf("expected spectator remove ai denied, got %v", err)
+	}
+	if _, _, _, err := s.SendQuickChat(room.RoomID, spectator.UserID, "spec-chat", "nh"); err == nil || err.Error() != "spectator is read-only" {
+		t.Fatalf("expected spectator send quick chat denied, got %v", err)
+	}
+}
+
+func TestStore_SpectatorLeaveOnlyRemovesSpectator(t *testing.T) {
+	s := NewMemoryStore()
+	owner := s.CreateSession("owner")
+	guest := s.CreateSession("guest")
+	spectator := s.CreateSession("spectator")
+
+	room := s.CreateRoom(owner, "spec-leave", 10, 10)
+	if _, err := s.JoinRoom(room.RoomID, guest); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.SpectateRoom(room.RoomID, spectator); err != nil {
+		t.Fatal(err)
+	}
+
+	rBefore, _ := s.GetRoom(room.RoomID)
+	if len(rBefore.Players) != 2 || len(rBefore.Spectators) != 1 {
+		t.Fatalf("unexpected setup players=%d spectators=%d", len(rBefore.Players), len(rBefore.Spectators))
+	}
+	versionBefore := rBefore.StateVersion
+
+	rAfter, err := s.LeaveRoom(room.RoomID, spectator.UserID)
+	if err != nil {
+		t.Fatalf("spectator leave failed: %v", err)
+	}
+	if rAfter == nil {
+		t.Fatalf("room should still exist after spectator leave")
+	}
+	if len(rAfter.Players) != 2 {
+		t.Fatalf("expected players unchanged, got %d", len(rAfter.Players))
+	}
+	if len(rAfter.Spectators) != 0 {
+		t.Fatalf("expected spectator removed, got %d", len(rAfter.Spectators))
+	}
+	if rAfter.StateVersion != versionBefore+1 {
+		t.Fatalf("expected version bump by spectator leave")
+	}
+}
+
 func containsAction(actions []string, expected string) bool {
 	for _, action := range actions {
 		if action == expected {
