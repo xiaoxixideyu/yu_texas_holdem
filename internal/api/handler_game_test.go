@@ -391,3 +391,32 @@ func TestGameHandler_GetStateIncludesIsAi(t *testing.T) {
 		t.Fatalf("expected aiMemory in state body=%s", body)
 	}
 }
+
+func TestGameHandler_GetStateIncludesChipRefreshVote(t *testing.T) {
+	ms := store.NewMemoryStore()
+	owner := ms.CreateSession("owner")
+	guest := ms.CreateSession("guest")
+	room := ms.CreateRoom(owner, "room", 10, 10)
+	if _, err := ms.JoinRoom(room.RoomID, guest); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ms.StartChipRefreshVote(room.RoomID, owner.UserID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ms.CastChipRefreshVote(room.RoomID, guest.UserID, "agree"); err != nil {
+		t.Fatal(err)
+	}
+
+	h := &GameHandler{Store: ms}
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/rooms/"+room.RoomID+"/state", nil)
+	w := httptest.NewRecorder()
+	h.GetState(w, req, owner)
+
+	body := w.Body.String()
+	if !strings.Contains(body, `"chipRefreshVote":`) {
+		t.Fatalf("expected chipRefreshVote in state body=%s", body)
+	}
+	if !strings.Contains(body, `"votes":{"`) {
+		t.Fatalf("expected vote decisions in state body=%s", body)
+	}
+}

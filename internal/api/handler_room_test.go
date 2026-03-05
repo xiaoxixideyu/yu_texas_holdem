@@ -198,3 +198,89 @@ func TestRoomHandler_ToggleAIManaged_SpectatorForbidden(t *testing.T) {
 		t.Fatalf("expected spectator toggle forbidden, got %d body=%s", w.Code, w.Body.String())
 	}
 }
+
+func TestRoomHandler_ChipRefreshVoteFlow(t *testing.T) {
+	ms := store.NewMemoryStore()
+	owner := ms.CreateSession("owner")
+	guest := ms.CreateSession("guest")
+	room := ms.CreateRoom(owner, "room", 10, 10)
+	if _, err := ms.JoinRoom(room.RoomID, guest); err != nil {
+		t.Fatal(err)
+	}
+	h := &RoomHandler{Store: ms}
+
+	nonOwnerStartReq := httptest.NewRequest(http.MethodPost, "/api/v1/rooms/"+room.RoomID+"/chip-refresh", strings.NewReader(`{}`))
+	nonOwnerStartW := httptest.NewRecorder()
+	h.StartChipRefreshVote(nonOwnerStartW, nonOwnerStartReq, guest)
+	if nonOwnerStartW.Code != http.StatusBadRequest {
+		t.Fatalf("expected non-owner start vote bad request, got %d body=%s", nonOwnerStartW.Code, nonOwnerStartW.Body.String())
+	}
+
+	ownerStartReq := httptest.NewRequest(http.MethodPost, "/api/v1/rooms/"+room.RoomID+"/chip-refresh", strings.NewReader(`{}`))
+	ownerStartW := httptest.NewRecorder()
+	h.StartChipRefreshVote(ownerStartW, ownerStartReq, owner)
+	if ownerStartW.Code != http.StatusOK {
+		t.Fatalf("expected owner start vote success, got %d body=%s", ownerStartW.Code, ownerStartW.Body.String())
+	}
+
+	guestVoteReq := httptest.NewRequest(http.MethodPost, "/api/v1/rooms/"+room.RoomID+"/chip-refresh/vote", strings.NewReader(`{"decision":"agree"}`))
+	guestVoteW := httptest.NewRecorder()
+	h.CastChipRefreshVote(guestVoteW, guestVoteReq, guest)
+	if guestVoteW.Code != http.StatusOK {
+		t.Fatalf("expected guest vote success, got %d body=%s", guestVoteW.Code, guestVoteW.Body.String())
+	}
+
+	ownerVoteReq := httptest.NewRequest(http.MethodPost, "/api/v1/rooms/"+room.RoomID+"/chip-refresh/vote", strings.NewReader(`{"decision":"agree"}`))
+	ownerVoteW := httptest.NewRecorder()
+	h.CastChipRefreshVote(ownerVoteW, ownerVoteReq, owner)
+	if ownerVoteW.Code != http.StatusOK {
+		t.Fatalf("expected owner vote success, got %d body=%s", ownerVoteW.Code, ownerVoteW.Body.String())
+	}
+	if !strings.Contains(ownerVoteW.Body.String(), `"result":"approved"`) {
+		t.Fatalf("expected approved result in response body=%s", ownerVoteW.Body.String())
+	}
+}
+
+func TestRoomHandler_ChipRefreshVote_SpectatorForbidden(t *testing.T) {
+	ms := store.NewMemoryStore()
+	owner := ms.CreateSession("owner")
+	spectator := ms.CreateSession("spectator")
+	room := ms.CreateRoom(owner, "room", 10, 10)
+	if _, err := ms.SpectateRoom(room.RoomID, spectator); err != nil {
+		t.Fatal(err)
+	}
+	h := &RoomHandler{Store: ms}
+
+	startReq := httptest.NewRequest(http.MethodPost, "/api/v1/rooms/"+room.RoomID+"/chip-refresh", strings.NewReader(`{}`))
+	startW := httptest.NewRecorder()
+	h.StartChipRefreshVote(startW, startReq, spectator)
+	if startW.Code != http.StatusForbidden {
+		t.Fatalf("expected spectator start vote forbidden, got %d body=%s", startW.Code, startW.Body.String())
+	}
+}
+
+func TestRoomHandler_ChipRefreshVote_AllowedWhenHandFinished(t *testing.T) {
+	ms := store.NewMemoryStore()
+	owner := ms.CreateSession("owner")
+	guest := ms.CreateSession("guest")
+	room := ms.CreateRoom(owner, "room", 10, 10)
+	if _, err := ms.JoinRoom(room.RoomID, guest); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ms.StartGame(room.RoomID, owner.UserID); err != nil {
+		t.Fatal(err)
+	}
+	r, _ := ms.GetRoom(room.RoomID)
+	turnUser := r.Game.Players[r.Game.TurnPos].UserID
+	if _, err := ms.ApplyAction(room.RoomID, turnUser, "finish-by-fold-room-handler", "fold", 0, r.StateVersion); err != nil {
+		t.Fatal(err)
+	}
+
+	h := &RoomHandler{Store: ms}
+	startReq := httptest.NewRequest(http.MethodPost, "/api/v1/rooms/"+room.RoomID+"/chip-refresh", strings.NewReader(`{}`))
+	startW := httptest.NewRecorder()
+	h.StartChipRefreshVote(startW, startReq, owner)
+	if startW.Code != http.StatusOK {
+		t.Fatalf("expected owner start vote success after finished hand, got %d body=%s", startW.Code, startW.Body.String())
+	}
+}

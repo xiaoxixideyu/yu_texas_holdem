@@ -65,6 +65,12 @@ const REVEAL_TEXT = {
   3: "全亮",
 };
 
+const CHIP_REFRESH_RESULT_TEXT = {
+  pending: "投票进行中",
+  approved: "投票已通过，已刷新全员筹码",
+  rejected: "投票已拒绝",
+};
+
 const QUICK_CHAT_TEXT = {
   wait_flowers: "快点吧，我等到花都谢了",
   solve_universe: "你这手在算宇宙最优解吗",
@@ -314,6 +320,84 @@ function aiManagedBadge(isAIManaged) {
   return isAIManaged ? '<span class="badge badge-ai-managed">AI托管中</span>' : "";
 }
 
+function getChipRefreshVote(data) {
+  if (!data || !data.chipRefreshVote) return null;
+  return data.chipRefreshVote;
+}
+
+function getChipRefreshEligibleIds(vote) {
+  if (!vote || !Array.isArray(vote.eligibleUserIds)) return [];
+  return vote.eligibleUserIds;
+}
+
+function getChipRefreshDecision(vote, userId) {
+  if (!vote || !vote.votes || !userId) return "";
+  return String(vote.votes[userId] || "");
+}
+
+function chipRefreshStatusBadge(data, player) {
+  const vote = getChipRefreshVote(data);
+  if (!vote || !player || player.isAi) return "";
+  if (!getChipRefreshEligibleIds(vote).includes(player.userId)) return "";
+
+  const decision = getChipRefreshDecision(vote, player.userId);
+  if (decision === "agree") {
+    return '<span class="badge badge-vote-agree">已同意</span>';
+  }
+  if (decision === "reject") {
+    return '<span class="badge badge-vote-reject">已拒绝</span>';
+  }
+  return '<span class="badge badge-vote-pending">待表态</span>';
+}
+
+function chipRefreshVoteButtons(data, player) {
+  const vote = getChipRefreshVote(data);
+  if (!vote || vote.result !== "pending") return "";
+  if (isSpectatorMode()) return "";
+  if (!player || player.isAi || player.userId !== currentUserId) return "";
+  if (!getChipRefreshEligibleIds(vote).includes(player.userId)) return "";
+  if (getChipRefreshDecision(vote, player.userId)) return "";
+
+  return `
+    <div class="chip-vote-actions">
+      <button type="button" class="btn-secondary" onclick="castChipRefreshVote('agree')">同意</button>
+      <button type="button" class="btn-danger" onclick="castChipRefreshVote('reject')">拒绝</button>
+    </div>
+  `;
+}
+
+function canStartChipRefreshVoteNow(data) {
+  if (!data) return false;
+  if (!data.game) return true;
+  return data.game.stage === "finished";
+}
+
+function updateChipRefreshHint(data) {
+  const hint = document.getElementById("chip-refresh-hint");
+  if (!hint) return;
+
+  const vote = getChipRefreshVote(data);
+  if (!vote) {
+    hint.style.display = "none";
+    hint.textContent = "";
+    return;
+  }
+
+  const eligible = getChipRefreshEligibleIds(vote);
+  let agreed = 0;
+  let rejected = 0;
+  eligible.forEach((uid) => {
+    const decision = getChipRefreshDecision(vote, uid);
+    if (decision === "agree") agreed += 1;
+    if (decision === "reject") rejected += 1;
+  });
+  const pending = Math.max(0, eligible.length - agreed - rejected);
+
+  const resultText = CHIP_REFRESH_RESULT_TEXT[vote.result] || CHIP_REFRESH_RESULT_TEXT.pending;
+  hint.style.display = "block";
+  hint.textContent = `${resultText}（同意 ${agreed} / 拒绝 ${rejected} / 待表态 ${pending}）`;
+}
+
 function renderAIList(data) {
   const root = document.getElementById("ai-list");
   if (!root) return;
@@ -338,14 +422,17 @@ function updateOwnerActions(data) {
   ownerUserId = data.ownerUserId;
   const btnStartGame = document.getElementById("btn-start-game");
   const btnNextHand = document.getElementById("btn-next-hand");
+  const btnRefreshStack = document.getElementById("btn-refresh-stack");
   const hint = document.getElementById("next-hand-hint");
   const aiManager = document.getElementById("ai-manager");
   const btnAddAI = document.getElementById("btn-add-ai");
-  if (!btnStartGame || !btnNextHand || !hint) return;
+  if (!btnStartGame || !btnNextHand || !btnRefreshStack || !hint) return;
 
   if (isSpectatorMode()) {
     btnStartGame.style.display = "none";
     btnNextHand.style.display = "none";
+    btnRefreshStack.style.display = "none";
+    btnRefreshStack.disabled = true;
     hint.style.display = "none";
     if (aiManager) aiManager.style.display = "none";
     if (btnAddAI) btnAddAI.disabled = true;
@@ -355,10 +442,15 @@ function updateOwnerActions(data) {
 
   const isOwner = data.ownerUserId === currentUserId;
   const isWaiting = data.roomStatus === "waiting" && !data.game;
+  const canRefreshVoteNow = canStartChipRefreshVoteNow(data);
   const canStartNextHand = !!data.canStartNextHand;
+  const hasPendingRefreshVote = !!(data.chipRefreshVote && data.chipRefreshVote.result === "pending");
 
   btnStartGame.style.display = isOwner && isWaiting ? "inline-block" : "none";
   btnNextHand.style.display = canStartNextHand ? "inline-block" : "none";
+  btnRefreshStack.style.display = isOwner && canRefreshVoteNow ? "inline-block" : "none";
+  btnRefreshStack.disabled = !(isOwner && canRefreshVoteNow) || hasPendingRefreshVote;
+  btnRefreshStack.title = hasPendingRefreshVote ? "当前已有刷新筹码投票进行中" : "发起刷新筹码投票";
 
   const handFinished = !!(data.game && data.game.stage === "finished");
   hint.style.display = !isOwner && handFinished ? "block" : "none";
@@ -442,14 +534,16 @@ function renderWaitingPlayers(data) {
       (p) => `
       <div class="player-row" data-user-id="${attrEscape(p.userId)}">
         <div class="player-avatar">${(p.username || "?")[0]}</div>
-        <div class="player-info">
+          <div class="player-info">
           <div class="player-name">
             ${p.username}
             ${p.userId === data.ownerUserId ? '<span class="badge badge-owner">房主</span>' : ""}
             ${aiBadge(p.isAi)}
             ${aiManagedBadge(p.aiManaged)}
+            ${chipRefreshStatusBadge(data, p)}
           </div>
           <div class="player-details">座位 ${p.seat} · 筹码 ${typeof p.stack === "number" ? p.stack : "-"}</div>
+          ${chipRefreshVoteButtons(data, p)}
         </div>
       </div>
     `
@@ -476,6 +570,7 @@ function renderState(data) {
     updateRevealControls(data);
     updateActionButtons(data);
     renderHandLog(data);
+    updateChipRefreshHint(data);
     return;
   }
 
@@ -523,6 +618,7 @@ function renderState(data) {
       if (isFolded) badges.push('<span class="badge badge-folded">已弃牌</span>');
       if (p.isAi) badges.push('<span class="badge badge-ai">AI</span>');
       if (p.aiManaged) badges.push('<span class="badge badge-ai-managed">AI托管中</span>');
+      badges.push(chipRefreshStatusBadge(data, p));
 
       const holeCardsHtml = (p.holeCards || []).length
         ? p.holeCards.map((c) => cardHtml(c)).join("")
@@ -536,6 +632,7 @@ function renderState(data) {
           <div class="player-info">
             <div class="player-name">${p.username} ${badges.join(" ")}</div>
             <div class="player-details">筹码 ${p.stack} · 押注 ${p.contributed || 0} · ${toActionText(p.lastAction)}${bestHand}</div>
+            ${chipRefreshVoteButtons(data, p)}
           </div>
           <div class="player-cards">${holeCardsHtml}</div>
         </div>`;
@@ -550,6 +647,7 @@ function renderState(data) {
   updateAIManagedButton(data);
   updateActionButtons(data);
   renderHandLog(data);
+  updateChipRefreshHint(data);
 }
 
 function cardText(c) {
@@ -994,6 +1092,45 @@ async function nextHand() {
   }
 }
 
+async function startChipRefreshVote() {
+  if (isSpectatorMode()) {
+    logLine("观战模式不可发起刷新筹码投票");
+    return;
+  }
+  try {
+    await api(`/api/v1/rooms/${roomId}/chip-refresh`, { method: "POST", body: {} });
+    logLine("已发起刷新筹码投票");
+    await loadState();
+  } catch (err) {
+    logLine(`发起刷新筹码投票失败：${err.message}`);
+  }
+}
+
+window.castChipRefreshVote = async function castChipRefreshVote(decision) {
+  if (isSpectatorMode()) {
+    logLine("观战模式不可参与刷新筹码投票");
+    return;
+  }
+  if (decision !== "agree" && decision !== "reject") {
+    logLine("无效投票类型");
+    return;
+  }
+  if (decision === "reject") {
+    const yes = window.confirm("确认拒绝刷新筹码吗？拒绝后本次投票会立即结束。");
+    if (!yes) return;
+  }
+  try {
+    await api(`/api/v1/rooms/${roomId}/chip-refresh/vote`, {
+      method: "POST",
+      body: { decision },
+    });
+    logLine(decision === "agree" ? "你已同意刷新筹码" : "你已拒绝刷新筹码，投票已结束");
+    await loadState();
+  } catch (err) {
+    logLine(`提交刷新筹码投票失败：${err.message}`);
+  }
+};
+
 async function addAI() {
   if (isSpectatorMode()) {
     logLine("观战模式不可添加 AI");
@@ -1077,6 +1214,7 @@ function resetPolling(ms) {
 
   document.getElementById("btn-start-game").addEventListener("click", startGame);
   document.getElementById("btn-next-hand").addEventListener("click", nextHand);
+  document.getElementById("btn-refresh-stack").addEventListener("click", startChipRefreshVote);
   const btnAIManaged = document.getElementById("btn-ai-managed");
   if (btnAIManaged) btnAIManaged.addEventListener("click", toggleAIManaged);
   document.getElementById("btn-leave-room").addEventListener("click", leaveRoom);
@@ -1084,6 +1222,7 @@ function resetPolling(ms) {
   if (btnAddAI) btnAddAI.addEventListener("click", addAI);
   document.getElementById("btn-start-game").style.display = "none";
   document.getElementById("btn-next-hand").style.display = "none";
+  document.getElementById("btn-refresh-stack").style.display = "none";
   if (btnAIManaged) btnAIManaged.style.display = "none";
 
   await initQuickChatConfig();

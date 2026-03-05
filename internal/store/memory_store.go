@@ -38,7 +38,8 @@ const (
 )
 
 const (
-	MaxAISummaries = 20
+	MaxAISummaries     = 20
+	DefaultPlayerStack = 10000
 )
 
 type QuickChatEvent struct {
@@ -144,6 +145,29 @@ type RoomSpectator struct {
 	Username string `json:"username"`
 }
 
+type ChipRefreshVoteResult string
+
+const (
+	ChipRefreshVotePending  ChipRefreshVoteResult = "pending"
+	ChipRefreshVoteApproved ChipRefreshVoteResult = "approved"
+	ChipRefreshVoteRejected ChipRefreshVoteResult = "rejected"
+)
+
+type ChipRefreshVoteDecision string
+
+const (
+	ChipRefreshVoteAgree  ChipRefreshVoteDecision = "agree"
+	ChipRefreshVoteReject ChipRefreshVoteDecision = "reject"
+)
+
+type ChipRefreshVote struct {
+	StartedByUserID string                             `json:"startedByUserId"`
+	EligibleUserIDs []string                           `json:"eligibleUserIds"`
+	Votes           map[string]ChipRefreshVoteDecision `json:"votes"`
+	Result          ChipRefreshVoteResult              `json:"result"`
+	UpdatedAtUnix   int64                              `json:"updatedAtUnix"`
+}
+
 type Room struct {
 	RoomID               string          `json:"roomId"`
 	Name                 string          `json:"name"`
@@ -164,6 +188,7 @@ type Room struct {
 	QuickChatLastSentAt  map[string]int64
 	QuickChatNextEventID int64
 	AIMemory             map[string]*RoomAIMemory `json:"aiMemory"`
+	ChipRefreshVote      *ChipRefreshVote         `json:"chipRefreshVote,omitempty"`
 	HandCounter          int64
 }
 
@@ -306,7 +331,7 @@ func (m *MemoryStore) CreateRoom(owner *Session, name string, openBetMin int, be
 		BetMin:               betMin,
 		OwnerUserID:          owner.UserID,
 		Status:               RoomWaiting,
-		Players:              []RoomPlayer{{UserID: owner.UserID, Username: owner.Username, Seat: 0, Stack: 10000, IsAI: false, AIManaged: false}},
+		Players:              []RoomPlayer{{UserID: owner.UserID, Username: owner.Username, Seat: 0, Stack: DefaultPlayerStack, IsAI: false, AIManaged: false}},
 		Spectators:           []RoomSpectator{},
 		StateVersion:         1,
 		UpdatedAtUnix:        time.Now().Unix(),
@@ -345,7 +370,8 @@ func (m *MemoryStore) JoinRoom(roomID string, s *Session) (*Room, error) {
 	if idx := spectatorIndex(r, s.UserID); idx >= 0 {
 		r.Spectators = append(r.Spectators[:idx], r.Spectators[idx+1:]...)
 	}
-	r.Players = append(r.Players, RoomPlayer{UserID: s.UserID, Username: s.Username, Seat: len(r.Players), Stack: 10000, IsAI: false, AIManaged: false})
+	r.Players = append(r.Players, RoomPlayer{UserID: s.UserID, Username: s.Username, Seat: len(r.Players), Stack: DefaultPlayerStack, IsAI: false, AIManaged: false})
+	r.ChipRefreshVote = nil
 	r.StateVersion++
 	r.UpdatedAtUnix = time.Now().Unix()
 	m.roomsVersion++
@@ -399,7 +425,7 @@ func (m *MemoryStore) AddAI(roomID, ownerUserID, name string) (*Room, *RoomPlaye
 		UserID:    m.newAIUserID(),
 		Username:  aiName,
 		Seat:      len(r.Players),
-		Stack:     10000,
+		Stack:     DefaultPlayerStack,
 		IsAI:      true,
 		AIManaged: false,
 	}
@@ -547,6 +573,17 @@ func cloneRoomLocked(r *Room) *Room {
 			copyRoom.AIMemory[uid] = m2
 		}
 	}
+	if r.ChipRefreshVote != nil {
+		voteCopy := *r.ChipRefreshVote
+		voteCopy.EligibleUserIDs = append([]string(nil), r.ChipRefreshVote.EligibleUserIDs...)
+		if r.ChipRefreshVote.Votes != nil {
+			voteCopy.Votes = map[string]ChipRefreshVoteDecision{}
+			for uid, decision := range r.ChipRefreshVote.Votes {
+				voteCopy.Votes[uid] = decision
+			}
+		}
+		copyRoom.ChipRefreshVote = &voteCopy
+	}
 	if r.Game != nil {
 		gCopy := *r.Game
 		if r.Game.CommunityCards != nil {
@@ -651,6 +688,7 @@ func (m *MemoryStore) StartGame(roomID, userID string) (*Room, error) {
 	r.Game = g
 	r.Status = RoomPlaying
 	r.ActionSeen = map[string]bool{}
+	r.ChipRefreshVote = nil
 	r.HandCounter++
 	if len(r.Players) > 0 {
 		r.NextDealerPos = (g.DealerPos + 1) % len(r.Players)
@@ -700,6 +738,7 @@ func (m *MemoryStore) LeaveRoom(roomID, userID string) (*Room, error) {
 	if isLeavingAI {
 		delete(r.AIMemory, userID)
 	}
+	r.ChipRefreshVote = nil
 
 	if countHumans(r.Players) == 0 {
 		delete(m.rooms, roomID)
@@ -761,6 +800,163 @@ func (m *MemoryStore) LeaveRoom(roomID, userID string) (*Room, error) {
 	return r, nil
 }
 
+func chipRefreshEligibleUserIDs(players []RoomPlayer) []string {
+	eligible := make([]string, 0, len(players))
+	for _, p := range players {
+		if !p.IsAI {
+			eligible = append(eligible, p.UserID)
+		}
+	}
+	return eligible
+}
+
+func containsUserID(userIDs []string, userID string) bool {
+	for _, uid := range userIDs {
+		if uid == userID {
+			return true
+		}
+	}
+	return false
+}
+
+func resetRoomPlayerStacks(r *Room, stack int) {
+	if r == nil {
+		return
+	}
+	for i := range r.Players {
+		r.Players[i].Stack = stack
+	}
+	if r.Game == nil {
+		return
+	}
+	for _, gp := range r.Game.Players {
+		gp.Stack = stack
+	}
+}
+
+func normalizeChipRefreshVoteDecision(decision string) (ChipRefreshVoteDecision, bool) {
+	switch strings.ToLower(strings.TrimSpace(decision)) {
+	case string(ChipRefreshVoteAgree):
+		return ChipRefreshVoteAgree, true
+	case string(ChipRefreshVoteReject):
+		return ChipRefreshVoteReject, true
+	default:
+		return "", false
+	}
+}
+
+func canRunChipRefreshVote(r *Room) bool {
+	if r == nil {
+		return false
+	}
+	if r.Game == nil {
+		return true
+	}
+	return r.Game.Stage == domain.StageFinished
+}
+
+func (m *MemoryStore) StartChipRefreshVote(roomID, userID string) (*Room, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	r, ok := m.rooms[roomID]
+	if !ok {
+		return nil, errors.New("room not found")
+	}
+	if isSpectator(r, userID) {
+		return nil, errors.New("spectator is read-only")
+	}
+	if !isPlayer(r, userID) {
+		return nil, errors.New("user not in room")
+	}
+	if r.OwnerUserID != userID {
+		return nil, errors.New("only owner can start chip refresh vote")
+	}
+	if !canRunChipRefreshVote(r) {
+		return nil, errors.New("chip refresh vote is only allowed when hand is not in progress")
+	}
+
+	eligible := chipRefreshEligibleUserIDs(r.Players)
+	if len(eligible) == 0 {
+		return nil, errors.New("no eligible players")
+	}
+
+	now := time.Now().Unix()
+	r.ChipRefreshVote = &ChipRefreshVote{
+		StartedByUserID: userID,
+		EligibleUserIDs: eligible,
+		Votes:           map[string]ChipRefreshVoteDecision{},
+		Result:          ChipRefreshVotePending,
+		UpdatedAtUnix:   now,
+	}
+	r.StateVersion++
+	r.UpdatedAtUnix = now
+	m.roomsVersion++
+	return r, nil
+}
+
+func (m *MemoryStore) CastChipRefreshVote(roomID, userID, decision string) (*Room, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	r, ok := m.rooms[roomID]
+	if !ok {
+		return nil, errors.New("room not found")
+	}
+	if isSpectator(r, userID) {
+		return nil, errors.New("spectator is read-only")
+	}
+	if !isPlayer(r, userID) {
+		return nil, errors.New("user not in room")
+	}
+	if !canRunChipRefreshVote(r) {
+		return nil, errors.New("chip refresh vote is only allowed when hand is not in progress")
+	}
+
+	vote := r.ChipRefreshVote
+	if vote == nil || vote.Result != ChipRefreshVotePending {
+		return nil, errors.New("no active chip refresh vote")
+	}
+	if !containsUserID(vote.EligibleUserIDs, userID) {
+		return nil, errors.New("only eligible players can vote")
+	}
+
+	parsedDecision, ok := normalizeChipRefreshVoteDecision(decision)
+	if !ok {
+		return nil, errors.New("invalid vote decision")
+	}
+	if prev, voted := vote.Votes[userID]; voted {
+		if prev == parsedDecision {
+			return r, nil
+		}
+		return nil, errors.New("vote already submitted")
+	}
+
+	vote.Votes[userID] = parsedDecision
+	if parsedDecision == ChipRefreshVoteReject {
+		vote.Result = ChipRefreshVoteRejected
+	} else {
+		allAgreed := true
+		for _, uid := range vote.EligibleUserIDs {
+			if vote.Votes[uid] != ChipRefreshVoteAgree {
+				allAgreed = false
+				break
+			}
+		}
+		if allAgreed {
+			vote.Result = ChipRefreshVoteApproved
+			resetRoomPlayerStacks(r, DefaultPlayerStack)
+		}
+	}
+
+	now := time.Now().Unix()
+	vote.UpdatedAtUnix = now
+	r.StateVersion++
+	r.UpdatedAtUnix = now
+	m.roomsVersion++
+	return r, nil
+}
+
 func (m *MemoryStore) NextHand(roomID, userID string) (*Room, error) {
 	m.mu.Lock()
 	r, ok := m.rooms[roomID]
@@ -801,6 +997,7 @@ func (m *MemoryStore) NextHand(roomID, userID string) (*Room, error) {
 	r.Game = g
 	r.Status = RoomPlaying
 	r.ActionSeen = map[string]bool{}
+	r.ChipRefreshVote = nil
 	r.HandCounter++
 	if len(r.Players) > 0 {
 		r.NextDealerPos = (g.DealerPos + 1) % len(r.Players)

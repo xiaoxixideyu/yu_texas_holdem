@@ -335,9 +335,23 @@ pre {
 .badge-bb { background: #e67e22; color: #fff; }
 .badge-ai { background: #8b5cf6; color: #fff; }
 .badge-ai-managed { background: #0ea5e9; color: #fff; }
+.badge-vote-pending { background: rgba(148, 163, 184, .22); color: #cbd5e1; }
+.badge-vote-agree { background: rgba(34, 197, 94, .2); color: #86efac; }
+.badge-vote-reject { background: rgba(239, 68, 68, .2); color: #fca5a5; }
 
 .player-details { color: var(--text-muted); font-size: .82rem; }
 .player-cards { display: flex; gap: 3px; flex-shrink: 0; }
+
+.chip-vote-actions {
+  margin-top: 8px;
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+.chip-vote-actions button {
+  padding: 6px 12px;
+  font-size: .78rem;
+}
 
 .player-bubble {
   position: absolute;

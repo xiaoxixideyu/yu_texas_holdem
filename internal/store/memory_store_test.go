@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -1198,6 +1199,138 @@ func TestStore_SpectatorLeaveOnlyRemovesSpectator(t *testing.T) {
 	}
 	if rAfter.StateVersion != versionBefore+1 {
 		t.Fatalf("expected version bump by spectator leave")
+	}
+}
+
+func TestStore_ChipRefreshVoteRejectEndsVoting(t *testing.T) {
+	s := NewMemoryStore()
+	owner := s.CreateSession("owner")
+	guest := s.CreateSession("guest")
+	room := s.CreateRoom(owner, "vote", 10, 10)
+	if _, err := s.JoinRoom(room.RoomID, guest); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := s.StartChipRefreshVote(room.RoomID, guest.UserID); err == nil {
+		t.Fatalf("expected non-owner start vote fail")
+	}
+	if _, err := s.StartChipRefreshVote(room.RoomID, owner.UserID); err != nil {
+		t.Fatalf("start chip refresh vote failed: %v", err)
+	}
+
+	if _, err := s.CastChipRefreshVote(room.RoomID, guest.UserID, "agree"); err != nil {
+		t.Fatalf("guest agree failed: %v", err)
+	}
+	r1, _ := s.GetRoom(room.RoomID)
+	if r1.ChipRefreshVote == nil || r1.ChipRefreshVote.Result != ChipRefreshVotePending {
+		t.Fatalf("expected vote still pending after partial agree")
+	}
+
+	if _, err := s.CastChipRefreshVote(room.RoomID, owner.UserID, "reject"); err != nil {
+		t.Fatalf("owner reject failed: %v", err)
+	}
+	r2, _ := s.GetRoom(room.RoomID)
+	if r2.ChipRefreshVote == nil {
+		t.Fatalf("expected vote state after reject")
+	}
+	if r2.ChipRefreshVote.Result != ChipRefreshVoteRejected {
+		t.Fatalf("expected rejected result, got %s", r2.ChipRefreshVote.Result)
+	}
+	if r2.ChipRefreshVote.Votes[owner.UserID] != ChipRefreshVoteReject {
+		t.Fatalf("expected owner reject vote recorded")
+	}
+	if _, err := s.CastChipRefreshVote(room.RoomID, guest.UserID, "agree"); err == nil {
+		t.Fatalf("expected no active vote after reject")
+	}
+}
+
+func TestStore_ChipRefreshVoteAllAgreeResetsAllPlayerStacks(t *testing.T) {
+	s := NewMemoryStore()
+	owner := s.CreateSession("owner")
+	guest := s.CreateSession("guest")
+	room := s.CreateRoom(owner, "vote-reset", 10, 10)
+	if _, err := s.JoinRoom(room.RoomID, guest); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := s.AddAI(room.RoomID, owner.UserID, "bot"); err != nil {
+		t.Fatal(err)
+	}
+
+	s.mu.Lock()
+	internalRoom := s.rooms[room.RoomID]
+	internalRoom.Players[0].Stack = 3200
+	internalRoom.Players[1].Stack = 4500
+	internalRoom.Players[2].Stack = 800
+	s.mu.Unlock()
+
+	if _, err := s.StartChipRefreshVote(room.RoomID, owner.UserID); err != nil {
+		t.Fatalf("start chip refresh vote failed: %v", err)
+	}
+	r1, _ := s.GetRoom(room.RoomID)
+	if r1.ChipRefreshVote == nil {
+		t.Fatalf("expected vote state")
+	}
+	if len(r1.ChipRefreshVote.EligibleUserIDs) != 2 {
+		t.Fatalf("expected only human players eligible, got %d", len(r1.ChipRefreshVote.EligibleUserIDs))
+	}
+	for _, uid := range r1.ChipRefreshVote.EligibleUserIDs {
+		if strings.HasPrefix(uid, "ai-") {
+			t.Fatalf("ai should not be eligible voter")
+		}
+	}
+
+	if _, err := s.CastChipRefreshVote(room.RoomID, guest.UserID, "agree"); err != nil {
+		t.Fatalf("guest agree failed: %v", err)
+	}
+	if _, err := s.CastChipRefreshVote(room.RoomID, owner.UserID, "agree"); err != nil {
+		t.Fatalf("owner agree failed: %v", err)
+	}
+
+	r2, _ := s.GetRoom(room.RoomID)
+	if r2.ChipRefreshVote == nil || r2.ChipRefreshVote.Result != ChipRefreshVoteApproved {
+		t.Fatalf("expected approved vote result")
+	}
+	for _, p := range r2.Players {
+		if p.Stack != DefaultPlayerStack {
+			t.Fatalf("expected player %s stack reset to %d, got %d", p.UserID, DefaultPlayerStack, p.Stack)
+		}
+	}
+}
+
+func TestStore_ChipRefreshVoteAllowedWhenHandFinished(t *testing.T) {
+	s := NewMemoryStore()
+	owner := s.CreateSession("owner")
+	guest := s.CreateSession("guest")
+	room := s.CreateRoom(owner, "vote-finished", 10, 10)
+	if _, err := s.JoinRoom(room.RoomID, guest); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.StartGame(room.RoomID, owner.UserID); err != nil {
+		t.Fatal(err)
+	}
+	r1, _ := s.GetRoom(room.RoomID)
+	turnUser := r1.Game.Players[r1.Game.TurnPos].UserID
+	if _, err := s.ApplyAction(room.RoomID, turnUser, "finish-by-fold", "fold", 0, r1.StateVersion); err != nil {
+		t.Fatal(err)
+	}
+
+	r2, _ := s.GetRoom(room.RoomID)
+	if r2.Game == nil || r2.Game.Stage != "finished" {
+		t.Fatalf("expected finished hand before vote")
+	}
+	if _, err := s.StartChipRefreshVote(room.RoomID, owner.UserID); err != nil {
+		t.Fatalf("expected start vote allowed after hand finished, got %v", err)
+	}
+	if _, err := s.CastChipRefreshVote(room.RoomID, guest.UserID, "agree"); err != nil {
+		t.Fatalf("guest vote agree failed: %v", err)
+	}
+	if _, err := s.CastChipRefreshVote(room.RoomID, owner.UserID, "agree"); err != nil {
+		t.Fatalf("owner vote agree failed: %v", err)
+	}
+
+	r3, _ := s.GetRoom(room.RoomID)
+	if r3.ChipRefreshVote == nil || r3.ChipRefreshVote.Result != ChipRefreshVoteApproved {
+		t.Fatalf("expected approved vote result after finished-hand voting")
 	}
 }
 

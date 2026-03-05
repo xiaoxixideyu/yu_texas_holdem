@@ -72,6 +72,16 @@ func main() {
 			w.WriteHeader(http.StatusMethodNotAllowed)
 		case "ai-managed":
 			roomH.ToggleAIManaged(w, r, s)
+		case "chip-refresh":
+			if len(parts) == 2 && r.Method == http.MethodPost {
+				roomH.StartChipRefreshVote(w, r, s)
+				return
+			}
+			if len(parts) == 3 && parts[2] == "vote" && r.Method == http.MethodPost {
+				roomH.CastChipRefreshVote(w, r, s)
+				return
+			}
+			w.WriteHeader(http.StatusMethodNotAllowed)
 		case "state":
 			gameH.GetState(w, r, s)
 		case "actions":

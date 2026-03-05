@@ -227,6 +227,7 @@ func (h *GameHandler) GetState(w http.ResponseWriter, r *http.Request, s *store.
 		"roomPlayers":      roomPlayers,
 		"canStartNextHand": room.OwnerUserID == s.UserID && room.Game != nil && room.Game.Stage == domain.StageFinished,
 		"aiMemory":         room.AIMemory,
+		"chipRefreshVote":  room.ChipRefreshVote,
 		"viewerRole":       viewerRole,
 	}
 	if room.Game == nil {
