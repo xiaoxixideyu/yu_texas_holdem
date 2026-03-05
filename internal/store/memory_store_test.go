@@ -585,6 +585,12 @@ func TestStore_AITurnInputContainsHoleCardsWithoutOpponentsCards(t *testing.T) {
 			if input.PreflopTier == "" {
 				t.Fatalf("expected preflop tier set")
 			}
+			if input.PreflopPosition == "" {
+				t.Fatalf("expected preflop position set")
+			}
+			if input.EffectiveStackBB <= 0 {
+				t.Fatalf("expected effective stack bb > 0, got %.2f", input.EffectiveStackBB)
+			}
 			if input.MadeHandStrength == "" {
 				t.Fatalf("expected made hand strength set")
 			}
@@ -644,13 +650,14 @@ func TestStore_FallbackDecision_StrongHandBetsWhenAllowed(t *testing.T) {
 func TestStore_FallbackDecision_BetAmountWithinStackAndMin(t *testing.T) {
 	decision := fallbackDecision(ai.DecisionInput{
 		AllowedActions:   []string{"bet", "fold"},
-		RoundBet:         0,
-		MinBet:           40,
-		MinRaise:         0,
+		Stage:            "river",
+		RoundBet:         20,
+		MinBet:           20,
+		MinRaise:         40,
 		Stack:            45,
-		Pot:              20,
-		CallAmount:       0,
-		MadeHandStrength: "strong",
+		Pot:              120,
+		CallAmount:       20,
+		MadeHandStrength: "monster",
 		DrawFlags:        []string{"none"},
 	})
 	if decision.Action != "bet" {
@@ -661,6 +668,225 @@ func TestStore_FallbackDecision_BetAmountWithinStackAndMin(t *testing.T) {
 	}
 	if decision.Amount > 45 {
 		t.Fatalf("expected bet amount <= stack, got %d", decision.Amount)
+	}
+}
+
+func TestStore_FallbackDecision_MixedBetSizingByStateVersion(t *testing.T) {
+	base := ai.DecisionInput{
+		RoomID:           "room-mix",
+		HandID:           77,
+		AIUserID:         "ai-1",
+		Stage:            "river",
+		AllowedActions:   []string{"bet", "call", "fold"},
+		RoundBet:         40,
+		MinRaise:         80,
+		Stack:            5000,
+		Pot:              1000,
+		CallAmount:       40,
+		MadeHandStrength: "monster",
+		DrawFlags:        []string{"none"},
+		CommunityCards:   []string{"AH", "KD", "7C", "2S", "2D"},
+		HoleCards:        []string{"AS", "AD"},
+	}
+
+	input1 := base
+	input1.StateVersion = 200
+	input2 := base
+	input2.StateVersion = 201
+
+	decision1 := fallbackDecision(input1)
+	decision2 := fallbackDecision(input2)
+	if decision1.Action != "bet" || decision2.Action != "bet" {
+		t.Fatalf("expected both decisions to bet, got %s and %s", decision1.Action, decision2.Action)
+	}
+	if decision1.Amount == decision2.Amount {
+		t.Fatalf("expected mixed bet sizing across states, got same amount %d", decision1.Amount)
+	}
+}
+
+func TestStore_FallbackDecision_PreflopUTGFacingRaiseFoldsTrash(t *testing.T) {
+	decision := fallbackDecision(ai.DecisionInput{
+		RoomID:             "preflop-utg-fold",
+		AIUserID:           "ai-1",
+		Stage:              "preflop",
+		AllowedActions:     []string{"call", "fold"},
+		RoundBet:           30,
+		OpenBetMin:         10,
+		BetMin:             10,
+		CallAmount:         30,
+		Stack:              1000,
+		Pot:                75,
+		PreflopTier:        "trash",
+		PreflopPosition:    "utg",
+		EffectiveStackBB:   100,
+		PreflopFacingRaise: true,
+		HoleCards:          []string{"7C", "2D"},
+		Players: []ai.PlayerSnapshot{
+			{UserID: "ai-1"},
+			{UserID: "p-1", Folded: false},
+			{UserID: "p-2", Folded: false},
+		},
+	})
+	if decision.Action != "fold" {
+		t.Fatalf("expected utg trash hand to fold vs raise, got %s", decision.Action)
+	}
+}
+
+func TestStore_FallbackDecision_PreflopButtonOpensStrong(t *testing.T) {
+	decision := fallbackDecision(ai.DecisionInput{
+		RoomID:             "preflop-btn-open",
+		AIUserID:           "ai-1",
+		Stage:              "preflop",
+		AllowedActions:     []string{"bet", "call", "fold"},
+		RoundBet:           10,
+		OpenBetMin:         10,
+		BetMin:             10,
+		CallAmount:         10,
+		MinRaise:           20,
+		Stack:              1000,
+		Pot:                15,
+		PreflopTier:        "strong",
+		PreflopPosition:    "btn",
+		EffectiveStackBB:   90,
+		PreflopFacingRaise: false,
+		HoleCards:          []string{"AS", "QS"},
+		Players: []ai.PlayerSnapshot{
+			{UserID: "ai-1"},
+			{UserID: "p-1", Folded: false},
+			{UserID: "p-2", Folded: false},
+		},
+	})
+	if decision.Action != "bet" {
+		t.Fatalf("expected button strong hand to open bet, got %s", decision.Action)
+	}
+	if decision.Amount < 20 {
+		t.Fatalf("expected open amount >= min raise, got %d", decision.Amount)
+	}
+}
+
+func TestStore_FallbackDecision_PreflopShortStackJamsPremium(t *testing.T) {
+	decision := fallbackDecision(ai.DecisionInput{
+		RoomID:             "preflop-short-jam",
+		AIUserID:           "ai-1",
+		Stage:              "preflop",
+		AllowedActions:     []string{"bet", "call", "allin", "fold"},
+		RoundBet:           30,
+		OpenBetMin:         10,
+		BetMin:             10,
+		CallAmount:         20,
+		MinRaise:           30,
+		Stack:              90,
+		Pot:                75,
+		PreflopTier:        "premium",
+		PreflopPosition:    "btn",
+		EffectiveStackBB:   9,
+		PreflopFacingRaise: true,
+		HoleCards:          []string{"AS", "AH"},
+		Players: []ai.PlayerSnapshot{
+			{UserID: "ai-1"},
+			{UserID: "p-1", Folded: false},
+		},
+	})
+	if decision.Action != "allin" {
+		t.Fatalf("expected short-stack premium to jam, got %s", decision.Action)
+	}
+}
+
+func TestStore_EstimateMonteCarloEquity_VisibleInfoOnly(t *testing.T) {
+	input := ai.DecisionInput{
+		AIUserID:       "ai-1",
+		Stage:          "river",
+		HoleCards:      []string{"TH", "3D"},
+		CommunityCards: []string{"AH", "KH", "QH", "JH", "2C"},
+		Players: []ai.PlayerSnapshot{
+			{UserID: "ai-1"},
+			{UserID: "p-1", Folded: false},
+		},
+	}
+	eq, ok := estimateMonteCarloEquity(input)
+	if !ok {
+		t.Fatalf("expected monte carlo equity to be available")
+	}
+	if eq < 0.98 {
+		t.Fatalf("expected near-nut equity, got %.4f", eq)
+	}
+}
+
+func TestStore_GuardAIDecision_RejectsNegativeEVCall(t *testing.T) {
+	input := ai.DecisionInput{
+		AIUserID:       "ai-1",
+		Stage:          "river",
+		Pot:            100,
+		CallAmount:     120,
+		Stack:          500,
+		RoundBet:       120,
+		AllowedActions: []string{"call", "fold"},
+		HoleCards:      []string{"3S", "4C"},
+		CommunityCards: []string{"AS", "KD", "7C", "2H", "9D"},
+		DrawFlags:      []string{"none"},
+		Players: []ai.PlayerSnapshot{
+			{UserID: "ai-1"},
+			{UserID: "p-1", Folded: false},
+		},
+	}
+	decision := guardAIDecision(input, ai.Decision{Action: "call", Amount: 0}, ai.Decision{Action: "fold", Amount: 0})
+	if decision.Action != "fold" {
+		t.Fatalf("expected guard to reject bad call, got %s", decision.Action)
+	}
+}
+
+func TestStore_GuardAIDecision_RejectsBadFold(t *testing.T) {
+	input := ai.DecisionInput{
+		AIUserID:       "ai-1",
+		Stage:          "river",
+		Pot:            150,
+		CallAmount:     10,
+		Stack:          800,
+		RoundBet:       10,
+		AllowedActions: []string{"call", "fold"},
+		HoleCards:      []string{"AS", "AD"},
+		CommunityCards: []string{"2C", "2D", "9H", "TS", "KD"},
+		DrawFlags:      []string{"none"},
+		Players: []ai.PlayerSnapshot{
+			{UserID: "ai-1"},
+			{UserID: "p-1", Folded: false},
+		},
+	}
+	decision := guardAIDecision(input, ai.Decision{Action: "fold", Amount: 0}, ai.Decision{Action: "call", Amount: 0})
+	if decision.Action != "call" {
+		t.Fatalf("expected guard to reject bad fold, got %s", decision.Action)
+	}
+}
+
+func TestStore_OpponentStatsStrategyAdjustments_FromNumericStats(t *testing.T) {
+	foldEqAdj, valueAdj, trapAdj := opponentStatsStrategyAdjustments(map[string]ai.OpponentStats{
+		"villain-1": {
+			Hands:            30,
+			VPIP:             0.48,
+			PFR:              0.12,
+			AggressionFactor: 1.2,
+			FoldRate:         0.12,
+			ShowdownRate:     0.40,
+			ShowdownWinRate:  0.42,
+		},
+		"villain-2": {
+			Hands:            26,
+			VPIP:             0.19,
+			PFR:              0.31,
+			AggressionFactor: 2.9,
+			FoldRate:         0.41,
+			ShowdownRate:     0.24,
+			ShowdownWinRate:  0.56,
+		},
+	})
+	if valueAdj <= 0 {
+		t.Fatalf("expected positive value adjustment, got %.4f", valueAdj)
+	}
+	if trapAdj <= 0 {
+		t.Fatalf("expected positive trap adjustment, got %.4f", trapAdj)
+	}
+	if foldEqAdj == 0 {
+		t.Fatalf("expected non-zero fold equity adjustment")
 	}
 }
 
@@ -746,6 +972,28 @@ func TestStore_AITurnAutoActionWithFallbackAndSummary(t *testing.T) {
 			t.Fatalf("ai summary not written in time")
 		}
 		time.Sleep(20 * time.Millisecond)
+	}
+
+	r3, ok := s.GetRoom(room.RoomID)
+	if !ok || r3 == nil {
+		t.Fatalf("room missing")
+	}
+	hasStats := false
+	for _, p := range r3.Players {
+		if !p.IsAI {
+			continue
+		}
+		mem := r3.AIMemory[p.UserID]
+		if mem == nil || len(mem.OpponentStats) == 0 {
+			continue
+		}
+		if ownerStats := mem.OpponentStats[owner.UserID]; ownerStats != nil && ownerStats.Hands > 0 {
+			hasStats = true
+			break
+		}
+	}
+	if !hasStats {
+		t.Fatalf("expected opponent stats to be recorded for ai memory")
 	}
 }
 

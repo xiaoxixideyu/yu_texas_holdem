@@ -54,7 +54,7 @@ go run ./cmd/server
 - 房主可在 `waiting` 状态下添加/删除多个 AI 玩家
 - AI 与真人一样走 `ApplyAction` 版本链路（`expectedVersion/stateVersion`）
 - AI 的 LLM 调用在锁外执行，锁内仅快照/校验/提交
-- AI 回合自动行动；模型输出非法时按兜底策略 `check > call > fold`
+- AI 回合自动行动；模型输出非法时使用“混合策略兜底”（牌力+压力+行动历史+对手画像），包含慢打、半诈唬与控池，不再固定单一路径
 - 真人玩家可开启/取消 `AI托管`（开启后由 AI 自动代打，手动下注类操作会被禁用）
 - 每手结束（正常结束 + leave 强制结束）写入 AI 复盘与对手画像
 - `state` 中可见：
