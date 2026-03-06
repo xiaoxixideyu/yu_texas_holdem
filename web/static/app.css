@@ -310,6 +310,12 @@ pre {
   color: #fff;
 }
 .player-row.is-folded { opacity: .45; }
+.player-row.is-sitting-out {
+  opacity: .8;
+}
+.player-row.is-sitting-out .player-cards {
+  opacity: .55;
+}
 
 .player-info { flex: 1; min-width: 0; }
 .player-name {
@@ -338,9 +344,30 @@ pre {
 .badge-vote-pending { background: rgba(148, 163, 184, .22); color: #cbd5e1; }
 .badge-vote-agree { background: rgba(34, 197, 94, .2); color: #86efac; }
 .badge-vote-reject { background: rgba(239, 68, 68, .2); color: #fca5a5; }
+.badge-sitout { background: rgba(148, 163, 184, .22); color: #cbd5e1; }
 
 .player-details { color: var(--text-muted); font-size: .82rem; }
 .player-cards { display: flex; gap: 3px; flex-shrink: 0; }
+
+.player-overlay {
+  position: absolute;
+  inset: 4px 0;
+  border-radius: var(--radius-sm);
+  background: rgba(11, 17, 32, .5);
+  border: 1px dashed rgba(148, 163, 184, .45);
+  color: #cbd5e1;
+  font-size: .76rem;
+  font-weight: 600;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  pointer-events: none;
+  z-index: 1;
+}
+.player-row.is-sitting-out > *:not(.player-overlay) {
+  position: relative;
+  z-index: 2;
+}
 
 .chip-vote-actions {
   margin-top: 8px;

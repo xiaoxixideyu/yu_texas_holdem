@@ -630,13 +630,18 @@ func (m *MemoryStore) GetRoom(roomID string) (*Room, bool) {
 
 func (m *MemoryStore) buildGameFromRoom(r *Room, stacks map[string]int) (*domain.GameState, error) {
 	gps := make([]*domain.GamePlayer, 0, len(r.Players))
-	for _, p := range r.Players {
+	playablePosToGamePos := map[int]int{}
+	for pos, p := range r.Players {
 		stack := p.Stack
 		if stacks != nil {
 			if v, ok := stacks[p.UserID]; ok {
 				stack = v
 			}
 		}
+		if stack <= 0 {
+			continue
+		}
+		playablePosToGamePos[pos] = len(gps)
 		gps = append(gps, &domain.GamePlayer{
 			UserID:    p.UserID,
 			Username:  p.Username,
@@ -646,11 +651,37 @@ func (m *MemoryStore) buildGameFromRoom(r *Room, stacks map[string]int) (*domain
 			Stack:     stack,
 		})
 	}
-	dealerPos := r.NextDealerPos
-	if len(gps) > 0 {
-		dealerPos = ((dealerPos % len(gps)) + len(gps)) % len(gps)
+	dealerPos := 0
+	if len(gps) > 0 && len(r.Players) > 0 {
+		startPos := ((r.NextDealerPos % len(r.Players)) + len(r.Players)) % len(r.Players)
+		for i := 0; i < len(r.Players); i++ {
+			roomPos := (startPos + i) % len(r.Players)
+			if pos, ok := playablePosToGamePos[roomPos]; ok {
+				dealerPos = pos
+				break
+			}
+		}
 	}
 	return domain.NewGame(gps, dealerPos, r.OpenBetMin, r.BetMin)
+}
+
+func nextDealerPosAfterStart(room *Room, game *domain.GameState) int {
+	if room == nil || len(room.Players) == 0 {
+		return 0
+	}
+	fallback := ((room.NextDealerPos % len(room.Players)) + len(room.Players)) % len(room.Players)
+	if game == nil || len(game.Players) == 0 {
+		return (fallback + 1) % len(room.Players)
+	}
+	dealerPos := game.DealerPos
+	if dealerPos < 0 || dealerPos >= len(game.Players) {
+		return (fallback + 1) % len(room.Players)
+	}
+	dealerSeat := game.Players[dealerPos].SeatIndex
+	if dealerSeat < 0 || dealerSeat >= len(room.Players) {
+		return (fallback + 1) % len(room.Players)
+	}
+	return (dealerSeat + 1) % len(room.Players)
 }
 
 func (m *MemoryStore) StartGame(roomID, userID string) (*Room, error) {
@@ -691,7 +722,7 @@ func (m *MemoryStore) StartGame(roomID, userID string) (*Room, error) {
 	r.ChipRefreshVote = nil
 	r.HandCounter++
 	if len(r.Players) > 0 {
-		r.NextDealerPos = (g.DealerPos + 1) % len(r.Players)
+		r.NextDealerPos = nextDealerPosAfterStart(r, g)
 	}
 	r.StateVersion++
 	r.UpdatedAtUnix = time.Now().Unix()
@@ -1000,7 +1031,7 @@ func (m *MemoryStore) NextHand(roomID, userID string) (*Room, error) {
 	r.ChipRefreshVote = nil
 	r.HandCounter++
 	if len(r.Players) > 0 {
-		r.NextDealerPos = (g.DealerPos + 1) % len(r.Players)
+		r.NextDealerPos = nextDealerPosAfterStart(r, g)
 	}
 	r.StateVersion++
 	r.UpdatedAtUnix = time.Now().Unix()

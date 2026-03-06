@@ -26,6 +26,7 @@ const ACTION_TEXT = {
   raise: "加注",
   allin: "梭哈",
   fold: "弃牌",
+  sit_out: "未参局",
   leave: "离开房间",
   small_blind: "小盲",
   big_blind: "大盲",
@@ -244,7 +245,7 @@ function updateActionButtons(data) {
 
   const me = getCurrentPlayer(data);
   if (!me) {
-    if (actionHint) actionHint.textContent = "你当前不在牌局中，无法操作。";
+    if (actionHint) actionHint.textContent = "你当前未参与本局，可发送短句并参与刷新筹码投票。";
     return;
   }
 
@@ -575,6 +576,26 @@ function renderState(data) {
   }
 
   const g = data.game;
+  const gamePlayers = Array.isArray(g.players) ? g.players : [];
+  const gamePlayerByUserId = new Map(gamePlayers.map((player) => [player.userId, player]));
+  const roomPlayers = Array.isArray(data.roomPlayers)
+    ? data.roomPlayers.slice().sort((a, b) => Number(a.seat || 0) - Number(b.seat || 0))
+    : [];
+  const tablePlayers = roomPlayers.length
+    ? roomPlayers
+    : gamePlayers
+        .map((player, idx) => ({
+          userId: player.userId,
+          username: player.username,
+          seat: Number.isInteger(player.seatIndex) ? player.seatIndex : idx,
+          stack: player.stack,
+          isAi: player.isAi,
+          aiManaged: player.aiManaged,
+        }))
+        .sort((a, b) => Number(a.seat || 0) - Number(b.seat || 0));
+  const dealerUserId = gamePlayers[g.dealerPos] ? gamePlayers[g.dealerPos].userId : "";
+  const smallBlindUserId = gamePlayers[g.smallBlindPos] ? gamePlayers[g.smallBlindPos].userId : "";
+  const bigBlindUserId = gamePlayers[g.bigBlindPos] ? gamePlayers[g.bigBlindPos].userId : "";
   const stageClass = g.stage === "finished" ? " finished" : "";
   const communityHtml = (g.communityCards || []).length
     ? (g.communityCards || []).map((c) => cardHtml(c)).join("")
@@ -585,7 +606,7 @@ function renderState(data) {
     const reason = toReasonText(g.result.reason ?? g.result.Reason);
     const winnerIds = (g.result.winners ?? g.result.Winners) || [];
     const winnerTexts = winnerIds.map((id) => {
-      const p = (g.players || []).find((pl) => pl.userId === id);
+      const p = gamePlayers.find((pl) => pl.userId === id);
       return p ? `${p.username}(${p.userId})` : id;
     });
     const winners = winnerTexts.join("、") || "无";
@@ -602,37 +623,48 @@ function renderState(data) {
     ${resultHtml}
   `;
 
-  document.getElementById("players").innerHTML = (g.players || [])
-    .map((p, idx) => {
-      const isTurn = p.isTurn;
-      const isFolded = p.folded;
+  document.getElementById("players").innerHTML = tablePlayers
+    .map((roomPlayer) => {
+      const p = gamePlayerByUserId.get(roomPlayer.userId);
+      const inCurrentHand = !!p;
+      const isTurn = !!(p && p.isTurn);
+      const isFolded = !!(p && p.folded);
       let rowClass = "player-row";
       if (isTurn) rowClass += " is-turn";
       if (isFolded) rowClass += " is-folded";
+      if (!inCurrentHand) rowClass += " is-sitting-out";
 
       const badges = [];
-      if (idx === g.dealerPos) badges.push('<span class="badge badge-dealer">D</span>');
-      if (idx === g.smallBlindPos) badges.push('<span class="badge badge-sb">SB</span>');
-      if (idx === g.bigBlindPos) badges.push('<span class="badge badge-bb">BB</span>');
+      if (roomPlayer.userId === data.ownerUserId) badges.push('<span class="badge badge-owner">房主</span>');
+      if (roomPlayer.userId === dealerUserId) badges.push('<span class="badge badge-dealer">D</span>');
+      if (roomPlayer.userId === smallBlindUserId) badges.push('<span class="badge badge-sb">SB</span>');
+      if (roomPlayer.userId === bigBlindUserId) badges.push('<span class="badge badge-bb">BB</span>');
       if (isTurn) badges.push('<span class="badge badge-turn">行动中</span>');
       if (isFolded) badges.push('<span class="badge badge-folded">已弃牌</span>');
-      if (p.isAi) badges.push('<span class="badge badge-ai">AI</span>');
-      if (p.aiManaged) badges.push('<span class="badge badge-ai-managed">AI托管中</span>');
-      badges.push(chipRefreshStatusBadge(data, p));
+      if (!inCurrentHand) badges.push('<span class="badge badge-sitout">未参局</span>');
+      if (roomPlayer.isAi) badges.push('<span class="badge badge-ai">AI</span>');
+      if (roomPlayer.aiManaged) badges.push('<span class="badge badge-ai-managed">AI托管中</span>');
+      badges.push(chipRefreshStatusBadge(data, roomPlayer));
 
-      const holeCardsHtml = (p.holeCards || []).length
-        ? p.holeCards.map((c) => cardHtml(c)).join("")
+      const holeCardsHtml = p && (p.holeCards || []).length
+        ? p.holeCards.map((card) => cardHtml(card)).join("")
         : '<span class="poker-card hidden-card"></span><span class="poker-card hidden-card"></span>';
 
-      const bestHand = p.bestHandName ? `<span class="hint"> · ${toHandText(p.bestHandName)}</span>` : "";
+      const bestHand = p && p.bestHandName ? `<span class="hint"> · ${toHandText(p.bestHandName)}</span>` : "";
+      const stack = typeof (p ? p.stack : roomPlayer.stack) === "number" ? (p ? p.stack : roomPlayer.stack) : "-";
+      const details = inCurrentHand
+        ? `筹码 ${stack} · 押注 ${p.contributed || 0} · ${toActionText(p.lastAction)}${bestHand}`
+        : `筹码 ${stack} · 本局未参与`;
+      const sitOutMask = inCurrentHand ? "" : '<div class="player-overlay">本局未参与</div>';
 
       return `
-        <div class="${rowClass}" data-user-id="${attrEscape(p.userId)}">
-          <div class="player-avatar">${(p.username || "?")[0]}</div>
+        <div class="${rowClass}" data-user-id="${attrEscape(roomPlayer.userId)}">
+          ${sitOutMask}
+          <div class="player-avatar">${(roomPlayer.username || "?")[0]}</div>
           <div class="player-info">
-            <div class="player-name">${p.username} ${badges.join(" ")}</div>
-            <div class="player-details">筹码 ${p.stack} · 押注 ${p.contributed || 0} · ${toActionText(p.lastAction)}${bestHand}</div>
-            ${chipRefreshVoteButtons(data, p)}
+            <div class="player-name">${roomPlayer.username} ${badges.join(" ")}</div>
+            <div class="player-details">${details}</div>
+            ${chipRefreshVoteButtons(data, roomPlayer)}
           </div>
           <div class="player-cards">${holeCardsHtml}</div>
         </div>`;

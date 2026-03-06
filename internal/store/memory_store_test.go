@@ -62,6 +62,179 @@ func TestStore_RoomLifecycleAndVersionConflict(t *testing.T) {
 	}
 }
 
+func TestStore_StartGame_SkipsPlayersWithZeroStack(t *testing.T) {
+	s := NewMemoryStore()
+	owner := s.CreateSession("owner")
+	guest1 := s.CreateSession("guest-1")
+	guest2 := s.CreateSession("guest-2")
+
+	room := s.CreateRoom(owner, "skip-zero", 10, 10)
+	if _, err := s.JoinRoom(room.RoomID, guest1); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.JoinRoom(room.RoomID, guest2); err != nil {
+		t.Fatal(err)
+	}
+
+	s.mu.Lock()
+	s.rooms[room.RoomID].Players[0].Stack = 0
+	s.mu.Unlock()
+
+	updated, err := s.StartGame(room.RoomID, owner.UserID)
+	if err != nil {
+		t.Fatalf("start game failed: %v", err)
+	}
+	if updated.Game == nil {
+		t.Fatalf("expected game initialized")
+	}
+	if len(updated.Game.Players) != 2 {
+		t.Fatalf("expected 2 active players, got %d", len(updated.Game.Players))
+	}
+	for _, gp := range updated.Game.Players {
+		if gp.UserID == owner.UserID {
+			t.Fatalf("expected zero-stack owner to be excluded from game players")
+		}
+	}
+	if updated.Game.Players[updated.Game.DealerPos].UserID != guest1.UserID {
+		t.Fatalf("expected dealer to skip zero-stack seat and land on guest1")
+	}
+}
+
+func TestStore_StartGame_RequiresAtLeastTwoPlayersWithChips(t *testing.T) {
+	s := NewMemoryStore()
+	owner := s.CreateSession("owner")
+	guest := s.CreateSession("guest")
+
+	room := s.CreateRoom(owner, "need-chips", 10, 10)
+	if _, err := s.JoinRoom(room.RoomID, guest); err != nil {
+		t.Fatal(err)
+	}
+
+	s.mu.Lock()
+	internal := s.rooms[room.RoomID]
+	internal.Players[0].Stack = 0
+	internal.Players[1].Stack = 0
+	s.mu.Unlock()
+
+	if _, err := s.StartGame(room.RoomID, owner.UserID); err == nil {
+		t.Fatalf("expected start game to fail when all players are out of chips")
+	}
+}
+
+func TestStore_NextHand_SkipsZeroStackPlayersAndRotatesDealer(t *testing.T) {
+	s := NewMemoryStore()
+	owner := s.CreateSession("owner")
+	guest1 := s.CreateSession("guest-1")
+	guest2 := s.CreateSession("guest-2")
+
+	room := s.CreateRoom(owner, "next-skip-zero", 10, 10)
+	if _, err := s.JoinRoom(room.RoomID, guest1); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.JoinRoom(room.RoomID, guest2); err != nil {
+		t.Fatal(err)
+	}
+
+	s.mu.Lock()
+	s.rooms[room.RoomID].Players[0].Stack = 0
+	s.mu.Unlock()
+
+	started, err := s.StartGame(room.RoomID, owner.UserID)
+	if err != nil {
+		t.Fatalf("start game failed: %v", err)
+	}
+	firstDealer := started.Game.Players[started.Game.DealerPos].UserID
+	if firstDealer != guest1.UserID {
+		t.Fatalf("expected first dealer guest1, got %s", firstDealer)
+	}
+
+	firstTurnUser := started.Game.Players[started.Game.TurnPos].UserID
+	finished, err := s.ApplyAction(room.RoomID, firstTurnUser, "finish-hand-by-fold", "fold", 0, started.StateVersion)
+	if err != nil {
+		t.Fatalf("finish first hand failed: %v", err)
+	}
+	if finished.Game == nil || finished.Game.Stage != "finished" {
+		t.Fatalf("expected first hand finished before next hand")
+	}
+
+	next, err := s.NextHand(room.RoomID, owner.UserID)
+	if err != nil {
+		t.Fatalf("next hand failed: %v", err)
+	}
+	if next.Game == nil {
+		t.Fatalf("expected next hand game initialized")
+	}
+	if len(next.Game.Players) != 2 {
+		t.Fatalf("expected 2 active players in next hand, got %d", len(next.Game.Players))
+	}
+	for _, gp := range next.Game.Players {
+		if gp.UserID == owner.UserID {
+			t.Fatalf("expected zero-stack owner to stay excluded in next hand")
+		}
+	}
+	secondDealer := next.Game.Players[next.Game.DealerPos].UserID
+	if secondDealer != guest2.UserID {
+		t.Fatalf("expected second dealer guest2 after rotation, got %s", secondDealer)
+	}
+}
+
+func TestStore_StartAndNextHand_SkipMultipleZeroStackSeats(t *testing.T) {
+	s := NewMemoryStore()
+	owner := s.CreateSession("owner")
+	guest1 := s.CreateSession("guest-1")
+	guest2 := s.CreateSession("guest-2")
+	guest3 := s.CreateSession("guest-3")
+
+	room := s.CreateRoom(owner, "multi-zero-seats", 10, 10)
+	if _, err := s.JoinRoom(room.RoomID, guest1); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.JoinRoom(room.RoomID, guest2); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.JoinRoom(room.RoomID, guest3); err != nil {
+		t.Fatal(err)
+	}
+
+	s.mu.Lock()
+	s.rooms[room.RoomID].Players[0].Stack = 0
+	s.rooms[room.RoomID].Players[1].Stack = 0
+	s.mu.Unlock()
+
+	first, err := s.StartGame(room.RoomID, owner.UserID)
+	if err != nil {
+		t.Fatalf("start game failed: %v", err)
+	}
+	if first.Game == nil {
+		t.Fatalf("expected game initialized")
+	}
+	if len(first.Game.Players) != 2 {
+		t.Fatalf("expected 2 active players, got %d", len(first.Game.Players))
+	}
+	firstDealer := first.Game.Players[first.Game.DealerPos].UserID
+	if firstDealer != guest2.UserID {
+		t.Fatalf("expected dealer to skip seat0/seat1 and land on guest2, got %s", firstDealer)
+	}
+
+	firstTurnUser := first.Game.Players[first.Game.TurnPos].UserID
+	afterFirst, err := s.ApplyAction(room.RoomID, firstTurnUser, "multi-zero-finish-1", "fold", 0, first.StateVersion)
+	if err != nil {
+		t.Fatalf("finish first hand failed: %v", err)
+	}
+	if afterFirst.Game == nil || afterFirst.Game.Stage != "finished" {
+		t.Fatalf("expected first hand finished")
+	}
+
+	second, err := s.NextHand(room.RoomID, owner.UserID)
+	if err != nil {
+		t.Fatalf("next hand failed: %v", err)
+	}
+	secondDealer := second.Game.Players[second.Game.DealerPos].UserID
+	if secondDealer != guest3.UserID {
+		t.Fatalf("expected dealer rotate to guest3, got %s", secondDealer)
+	}
+}
+
 func TestStore_RevealAfterFinished_SucceedsAndBumpsVersion(t *testing.T) {
 	s := NewMemoryStore()
 	owner := s.CreateSession("owner")
@@ -1331,6 +1504,95 @@ func TestStore_ChipRefreshVoteAllowedWhenHandFinished(t *testing.T) {
 	r3, _ := s.GetRoom(room.RoomID)
 	if r3.ChipRefreshVote == nil || r3.ChipRefreshVote.Result != ChipRefreshVoteApproved {
 		t.Fatalf("expected approved vote result after finished-hand voting")
+	}
+}
+
+func TestStore_ChipRefreshVote_ZeroStackSittingOutPlayerStillEligibleAndCanReturn(t *testing.T) {
+	s := NewMemoryStore()
+	owner := s.CreateSession("owner")
+	guest1 := s.CreateSession("guest-1")
+	guest2 := s.CreateSession("guest-2")
+
+	room := s.CreateRoom(owner, "vote-sitout", 10, 10)
+	if _, err := s.JoinRoom(room.RoomID, guest1); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.JoinRoom(room.RoomID, guest2); err != nil {
+		t.Fatal(err)
+	}
+
+	s.mu.Lock()
+	s.rooms[room.RoomID].Players[0].Stack = 0
+	s.mu.Unlock()
+
+	r1, err := s.StartGame(room.RoomID, owner.UserID)
+	if err != nil {
+		t.Fatalf("start game failed: %v", err)
+	}
+	if r1.Game == nil {
+		t.Fatalf("expected started game")
+	}
+	for _, gp := range r1.Game.Players {
+		if gp.UserID == owner.UserID {
+			t.Fatalf("expected zero-stack owner sitting out this hand")
+		}
+	}
+
+	turnUser := r1.Game.Players[r1.Game.TurnPos].UserID
+	r2, err := s.ApplyAction(room.RoomID, turnUser, "vote-sitout-finish", "fold", 0, r1.StateVersion)
+	if err != nil {
+		t.Fatalf("finish hand failed: %v", err)
+	}
+	if r2.Game == nil || r2.Game.Stage != "finished" {
+		t.Fatalf("expected finished hand before vote")
+	}
+
+	if _, err := s.StartChipRefreshVote(room.RoomID, owner.UserID); err != nil {
+		t.Fatalf("start chip refresh vote failed: %v", err)
+	}
+	r3, _ := s.GetRoom(room.RoomID)
+	if r3.ChipRefreshVote == nil {
+		t.Fatalf("expected vote state")
+	}
+	foundOwner := false
+	for _, uid := range r3.ChipRefreshVote.EligibleUserIDs {
+		if uid == owner.UserID {
+			foundOwner = true
+			break
+		}
+	}
+	if !foundOwner {
+		t.Fatalf("expected sitting-out owner to keep voting rights")
+	}
+
+	if _, err := s.CastChipRefreshVote(room.RoomID, owner.UserID, "agree"); err != nil {
+		t.Fatalf("expected sitting-out owner can vote agree, got %v", err)
+	}
+	if _, err := s.CastChipRefreshVote(room.RoomID, guest1.UserID, "agree"); err != nil {
+		t.Fatalf("guest1 agree failed: %v", err)
+	}
+	if _, err := s.CastChipRefreshVote(room.RoomID, guest2.UserID, "agree"); err != nil {
+		t.Fatalf("guest2 agree failed: %v", err)
+	}
+
+	r4, _ := s.GetRoom(room.RoomID)
+	if r4.Players[0].Stack != DefaultPlayerStack {
+		t.Fatalf("expected owner stack refreshed to %d, got %d", DefaultPlayerStack, r4.Players[0].Stack)
+	}
+
+	r5, err := s.NextHand(room.RoomID, owner.UserID)
+	if err != nil {
+		t.Fatalf("next hand failed after refresh: %v", err)
+	}
+	foundOwnerInHand := false
+	for _, gp := range r5.Game.Players {
+		if gp.UserID == owner.UserID {
+			foundOwnerInHand = true
+			break
+		}
+	}
+	if !foundOwnerInHand {
+		t.Fatalf("expected refreshed owner to rejoin next hand")
 	}
 }
 
