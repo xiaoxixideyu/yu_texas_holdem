@@ -129,6 +129,7 @@ type RoomAIMemory struct {
 	OpponentStats      map[string]*OpponentStat    `json:"opponentStats"`
 	LastSummarizedHand int64                       `json:"lastSummarizedHand"`
 	LastStatsHand      int64                       `json:"lastStatsHand"`
+	LastDecisionHand   int64                       `json:"-"`
 }
 
 type RoomPlayer struct {
@@ -544,6 +545,7 @@ func cloneRoomLocked(r *Room) *Room {
 				HandSummaries:      append([]string(nil), mem.HandSummaries...),
 				LastSummarizedHand: mem.LastSummarizedHand,
 				LastStatsHand:      mem.LastStatsHand,
+				LastDecisionHand:   mem.LastDecisionHand,
 			}
 			if mem.OpponentProfiles != nil {
 				m2.OpponentProfiles = map[string]*OpponentProfile{}
@@ -761,12 +763,11 @@ func (m *MemoryStore) LeaveRoom(roomID, userID string) (*Room, error) {
 		finishedByLeave = beforeStage != domain.StageFinished && r.Game.Stage == domain.StageFinished
 	}
 
-	isLeavingAI := r.Players[idx].IsAI
 	r.Players = append(r.Players[:idx], r.Players[idx+1:]...)
 	for i := range r.Players {
 		r.Players[i].Seat = i
 	}
-	if isLeavingAI {
+	if r.AIMemory != nil {
 		delete(r.AIMemory, userID)
 	}
 	r.ChipRefreshVote = nil
@@ -1866,6 +1867,23 @@ func (m *MemoryStore) ensureAIMemory(room *Room, aiUserID string) *RoomAIMemory 
 		room.AIMemory[aiUserID].OpponentStats = map[string]*OpponentStat{}
 	}
 	return room.AIMemory[aiUserID]
+}
+
+func shouldSummarizeAIMemoryForPlayer(room *Room, player *domain.GamePlayer, handID int64) bool {
+	if room == nil || player == nil {
+		return false
+	}
+	if player.IsAI {
+		return true
+	}
+	if room.AIMemory == nil {
+		return false
+	}
+	mem := room.AIMemory[player.UserID]
+	if mem == nil {
+		return false
+	}
+	return mem.LastDecisionHand == handID
 }
 
 func clampInt(value int, low int, high int) int {
@@ -3205,6 +3223,7 @@ func (m *MemoryStore) enqueueAIDecisionLockedWithRetry(room *Room, retriesLeft i
 		return
 	}
 	memory := m.ensureAIMemory(room, turn.UserID)
+	memory.LastDecisionHand = room.HandCounter
 	community := make([]string, 0, len(room.Game.CommunityCards))
 	for _, c := range room.Game.CommunityCards {
 		community = append(community, cardToText(c))
@@ -3280,7 +3299,7 @@ func (m *MemoryStore) enqueueAISummaryLocked(room *Room) {
 		reason = room.Game.Result.Reason
 	}
 	for _, gp := range room.Game.Players {
-		if !gp.IsAI {
+		if !shouldSummarizeAIMemoryForPlayer(room, gp, room.HandCounter) {
 			continue
 		}
 		m.updateOpponentStatsFromFinishedHandLocked(room, gp.UserID)
@@ -3360,6 +3379,9 @@ func (m *MemoryStore) applySummary(task *aiSummaryTask, summary ai.Summary) {
 	}
 	for uid, profile := range summary.OpponentProfiles {
 		if uid == "" {
+			continue
+		}
+		if uid == task.Input.AIUserID {
 			continue
 		}
 		if mem.OpponentProfiles == nil {

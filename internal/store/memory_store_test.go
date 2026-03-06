@@ -674,6 +674,141 @@ func TestStore_ToggleAIManaged_CurrentTurnActsByAI(t *testing.T) {
 	}
 }
 
+func TestStore_AIManagedPlayerGetsSummaryAndProfiles(t *testing.T) {
+	summaryCalled := make(chan ai.SummaryInput, 1)
+	stub := &stubAIService{}
+	stub.decisionFn = func(_ context.Context, input ai.DecisionInput) (ai.Decision, error) {
+		if containsAction(input.AllowedActions, "check") {
+			return ai.Decision{Action: "check", Amount: 0}, nil
+		}
+		if containsAction(input.AllowedActions, "call") {
+			return ai.Decision{Action: "call", Amount: 0}, nil
+		}
+		if containsAction(input.AllowedActions, "fold") {
+			return ai.Decision{Action: "fold", Amount: 0}, nil
+		}
+		return ai.Decision{Action: "allin", Amount: 0}, nil
+	}
+	stub.summaryFn = func(_ context.Context, input ai.SummaryInput) (ai.Summary, error) {
+		select {
+		case summaryCalled <- input:
+		default:
+		}
+		profiles := map[string]ai.Profile{}
+		for _, p := range input.Players {
+			if p.UserID == input.AIUserID || p.IsAI {
+				continue
+			}
+			profiles[p.UserID] = ai.Profile{Style: "tight", Tendencies: []string{"calls"}, Advice: "pressure"}
+		}
+		return ai.Summary{HandSummary: "managed summary", OpponentProfiles: profiles}, nil
+	}
+
+	s := NewMemoryStore(Options{AI: stub})
+	owner := s.CreateSession("owner")
+	guest := s.CreateSession("guest")
+	room := s.CreateRoom(owner, "room", 10, 10)
+	if _, err := s.JoinRoom(room.RoomID, guest); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.StartGame(room.RoomID, owner.UserID); err != nil {
+		t.Fatal(err)
+	}
+
+	r, ok := s.GetRoom(room.RoomID)
+	if !ok || r == nil || r.Game == nil {
+		t.Fatalf("room/game missing")
+	}
+	managedUserID := r.Game.Players[r.Game.TurnPos].UserID
+	opponentUserID := owner.UserID
+	if opponentUserID == managedUserID {
+		opponentUserID = guest.UserID
+	}
+	managedRoom, err := s.SetPlayerAIManaged(room.RoomID, managedUserID, true)
+	if err != nil {
+		t.Fatalf("enable ai managed failed: %v", err)
+	}
+	startVersion := managedRoom.StateVersion
+
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		latest, ok := s.GetRoom(room.RoomID)
+		if !ok || latest == nil || latest.Game == nil {
+			t.Fatalf("room/game missing while waiting ai action")
+		}
+		acted := false
+		for _, gp := range latest.Game.Players {
+			if gp.UserID == managedUserID {
+				acted = gp.LastAction != ""
+				break
+			}
+		}
+		if latest.StateVersion > startVersion && acted {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("ai did not act for managed player in time")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	deadline = time.Now().Add(2 * time.Second)
+	for {
+		latest, ok := s.GetRoom(room.RoomID)
+		if !ok || latest == nil || latest.Game == nil {
+			t.Fatalf("room/game missing while finishing hand")
+		}
+		if latest.Game.Stage == "finished" {
+			break
+		}
+		turn := latest.Game.Players[latest.Game.TurnPos]
+		if turn.UserID == managedUserID {
+			if time.Now().After(deadline) {
+				t.Fatalf("managed hand did not finish in time")
+			}
+			time.Sleep(10 * time.Millisecond)
+			continue
+		}
+		if _, err := s.ApplyAction(room.RoomID, turn.UserID, "finish-"+turn.UserID+time.Now().Format("150405.000000"), "fold", 0, latest.StateVersion); err != nil {
+			t.Fatalf("force finish failed: %v", err)
+		}
+	}
+
+	deadline = time.Now().Add(2 * time.Second)
+	for {
+		latest, ok := s.GetRoom(room.RoomID)
+		if !ok || latest == nil {
+			t.Fatalf("room missing")
+		}
+		mem := latest.AIMemory[managedUserID]
+		if mem != nil && mem.LastSummarizedHand > 0 {
+			if len(mem.HandSummaries) == 0 || mem.HandSummaries[len(mem.HandSummaries)-1] != "managed summary" {
+				t.Fatalf("expected managed summary written, got %+v", mem.HandSummaries)
+			}
+			if mem.OpponentProfiles[opponentUserID] == nil {
+				t.Fatalf("expected opponent profile recorded for managed player")
+			}
+			if mem.OpponentStats[opponentUserID] == nil || mem.OpponentStats[opponentUserID].Hands == 0 {
+				t.Fatalf("expected opponent stats recorded for managed player")
+			}
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("managed summary not written in time")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	select {
+	case input := <-summaryCalled:
+		if input.AIUserID != managedUserID {
+			t.Fatalf("expected summary for managed user %s, got %s", managedUserID, input.AIUserID)
+		}
+	default:
+		t.Fatalf("expected summary callback for managed player")
+	}
+}
+
 func TestStore_NoHumansRoomDeletedEvenWithAIs(t *testing.T) {
 	s := NewMemoryStore()
 	owner := s.CreateSession("owner")
