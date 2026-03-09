@@ -160,6 +160,100 @@ func NewGame(players []*GamePlayer, dealerPos int, openBetMin int, betMin int) (
 	return gs, nil
 }
 
+func NewGameWithDeck(players []*GamePlayer, dealerPos int, openBetMin int, betMin int, deck []Card) (*GameState, error) {
+	if len(deck) < 52 {
+		return nil, errors.New("deck must contain 52 cards")
+	}
+	if len(players) < 2 {
+		return nil, errors.New("at least 2 players required")
+	}
+	if openBetMin <= 0 {
+		return nil, errors.New("open bet min must be positive")
+	}
+	if betMin <= 0 {
+		return nil, errors.New("bet min must be positive")
+	}
+
+	bigBlind := openBetMin
+	smallBlind := openBetMin / 2
+	if smallBlind < 1 {
+		smallBlind = 1
+	}
+
+	var sbPos, bbPos int
+	if len(players) == 2 {
+		sbPos = dealerPos
+		bbPos = nextEligibleSeat(players, dealerPos)
+	} else {
+		sbPos = nextEligibleSeat(players, dealerPos)
+		bbPos = nextEligibleSeat(players, sbPos)
+	}
+
+	deckCopy := append([]Card(nil), deck...)
+	gs := &GameState{
+		Stage:          StagePreflop,
+		DealerPos:      dealerPos,
+		SmallBlindPos:  sbPos,
+		BigBlindPos:    bbPos,
+		CommunityCards: make([]Card, 0, 5),
+		Players:        players,
+		Deck:           deckCopy,
+		RoundBet:       bigBlind,
+		OpenBetMin:     openBetMin,
+		BetMin:         betMin,
+		HasActed:       map[string]bool{},
+		ActionLogs:     make([]ActionLog, 0),
+	}
+	for _, p := range gs.Players {
+		p.RevealMask = 0
+		p.Folded = false
+		p.AllIn = false
+		p.Contributed = 0
+		p.RoundContrib = 0
+		p.Won = 0
+		p.LastAction = ""
+		p.BestHandName = ""
+		p.BestHandCards = nil
+		p.HoleCards = []Card{gs.draw(), gs.draw()}
+		gs.HasActed[p.UserID] = false
+	}
+
+	sb := gs.Players[sbPos]
+	sbAmount := smallBlind
+	if sb.Stack < sbAmount {
+		sbAmount = sb.Stack
+	}
+	sb.Stack -= sbAmount
+	sb.Contributed = sbAmount
+	sb.RoundContrib = sbAmount
+	if sb.Stack == 0 {
+		sb.AllIn = true
+	}
+	sb.LastAction = "small_blind"
+	gs.Pot += sbAmount
+	gs.ActionLogs = append(gs.ActionLogs, ActionLog{UserID: sb.UserID, Username: sb.Username, Action: "small_blind", Amount: sbAmount, Stage: string(StagePreflop)})
+
+	bb := gs.Players[bbPos]
+	bbAmount := bigBlind
+	if bb.Stack < bbAmount {
+		bbAmount = bb.Stack
+	}
+	bb.Stack -= bbAmount
+	bb.Contributed = bbAmount
+	bb.RoundContrib = bbAmount
+	if bb.Stack == 0 {
+		bb.AllIn = true
+	}
+	bb.LastAction = "big_blind"
+	gs.Pot += bbAmount
+	gs.ActionLogs = append(gs.ActionLogs, ActionLog{UserID: bb.UserID, Username: bb.Username, Action: "big_blind", Amount: bbAmount, Stage: string(StagePreflop)})
+
+	gs.TurnPos = nextTurnSeat(gs.Players, bbPos)
+	gs.ensureTurnPlayable()
+
+	return gs, nil
+}
+
 func (g *GameState) ApplyAction(userID, action string, amount int) error {
 	if g.Stage == StageFinished || g.Stage == StageShowdown {
 		return errors.New("game already ended")

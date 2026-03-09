@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>AI Benchmark</title>
+  <link rel="stylesheet" href="/app.css" />
+</head>
+<body>
+  <main class="container">
+    <header class="header-row">
+      <h1>🧪 AI Benchmark</h1>
+      <div class="header-right">
+        <a href="/rooms.html">返回大厅</a>
+      </div>
+    </header>
+
+    <section class="card">
+      <h2>线上 AI 设置</h2>
+      <div style="display:flex; flex-direction:column; gap:12px; max-width:720px;">
+        <label style="display:flex; align-items:center; gap:8px;">
+          <input id="use-llm" type="checkbox" />
+          <span>启用 LLM 决策</span>
+        </label>
+        <label style="display:flex; flex-direction:column; gap:6px;">
+          <span>LLM 模型</span>
+          <input id="llm-model" type="text" placeholder="例如 openai/gpt-oss-120b" />
+        </label>
+        <div class="actions">
+          <button id="btn-save-settings" class="btn-primary" type="button">保存设置</button>
+          <button id="btn-refresh-settings" class="btn-secondary" type="button">刷新设置</button>
+        </div>
+        <p class="hint">开启后：正式对局优先走 LLM，失败再回退本地策略。关闭后：正式对局直接走离线本地策略，不发起 LLM 决策请求。</p>
+        <pre id="ai-settings-json"></pre>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>训练控制</h2>
+      <div class="actions" style="margin-bottom: 12px;">
+        <button id="btn-start" class="btn-warning" type="button">开始训练</button>
+        <button id="btn-stop" class="btn-danger" type="button">停止训练</button>
+        <button id="btn-refresh" class="btn-secondary" type="button">刷新状态</button>
+      </div>
+      <p id="status-message" class="hint">正在加载…</p>
+    </section>
+
+    <section class="card">
+      <h2>训练状态</h2>
+      <pre id="status-json"></pre>
+    </section>
+
+    <section class="card">
+      <h2>当前离线参数</h2>
+      <pre id="params-json"></pre>
+    </section>
+
+    <section class="card">
+      <h2>已持久化离线参数</h2>
+      <pre id="persisted-json"></pre>
+    </section>
+  </main>
+  <script src="/js/common.js"></script>
+  <script src="/js/ai_benchmark.js"></script>
+</body>
+</html>

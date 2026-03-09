@@ -3,6 +3,7 @@ package main
 import (
 	"log"
 	"net/http"
+	"os"
 	"strings"
 
 	"texas_yu/internal/ai"
@@ -19,16 +20,41 @@ func main() {
 		log.Printf("AI disabled: set AI_API_KEY and AI_MODEL to enable")
 	}
 
-	ms := store.NewMemoryStore(store.Options{AI: aiSvc})
+	strategyConfigPath := strings.TrimSpace(os.Getenv("AI_STRATEGY_CONFIG_PATH"))
+	if strategyConfigPath == "" {
+		strategyConfigPath = "data/ai_strategy.json"
+	}
+	aiRuntimeConfigPath := strings.TrimSpace(os.Getenv("AI_RUNTIME_CONFIG_PATH"))
+	if aiRuntimeConfigPath == "" {
+		aiRuntimeConfigPath = "data/ai_runtime.json"
+	}
+	ms := store.NewMemoryStore(store.Options{AI: aiSvc, AIConfig: aiCfg, StrategyConfigPath: strategyConfigPath, AIRuntimeConfigPath: aiRuntimeConfigPath})
 	authH := &api.AuthHandler{Store: ms}
 	roomH := &api.RoomHandler{Store: ms}
 	gameH := &api.GameHandler{Store: ms}
+	benchmarkH := &api.BenchmarkHandler{Store: ms}
 
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("/api/v1/session", authH.CreateSession)
 	mux.HandleFunc("/api/v1/session/me", authH.Me)
 	mux.HandleFunc("/api/v1/session/logout", authH.Logout)
+
+	mux.HandleFunc("/api/v1/ai-benchmark/status", api.RequireSession(ms, func(w http.ResponseWriter, r *http.Request, s *store.Session) {
+		benchmarkH.Status(w, r, s)
+	}))
+	mux.HandleFunc("/api/v1/ai-benchmark/start", api.RequireSession(ms, func(w http.ResponseWriter, r *http.Request, s *store.Session) {
+		benchmarkH.Start(w, r, s)
+	}))
+	mux.HandleFunc("/api/v1/ai-benchmark/stop", api.RequireSession(ms, func(w http.ResponseWriter, r *http.Request, s *store.Session) {
+		benchmarkH.Stop(w, r, s)
+	}))
+	mux.HandleFunc("/api/v1/ai-benchmark/settings", api.RequireSession(ms, func(w http.ResponseWriter, r *http.Request, s *store.Session) {
+		benchmarkH.UpdateSettings(w, r, s)
+	}))
+	mux.HandleFunc("/ai_benchmark", func(w http.ResponseWriter, r *http.Request) {
+		http.ServeFile(w, r, "web/static/ai_benchmark.html")
+	})
 
 	mux.HandleFunc("/api/v1/rooms", api.RequireSession(ms, func(w http.ResponseWriter, r *http.Request, s *store.Session) {
 		switch r.Method {

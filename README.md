@@ -40,6 +40,15 @@ export AI_MAX_RETRY="2"
 go run ./cmd/server
 ```
 
+## AI 策略参数与 Benchmark
+
+- 默认策略参数会持久化到 `data/ai_strategy.json`
+- 可通过环境变量 `AI_STRATEGY_CONFIG_PATH` 指定其他 JSON 文件路径
+- 线上 AI 运行时设置（是否启用 LLM、当前模型）会持久化到 `data/ai_runtime.json`
+- 服务启动时会读取该文件；训练过程中若发现更优参数，会实时落盘并立即生效
+- 隐藏页面 `http://localhost:8080/ai_benchmark` 可手动开启/停止离线 benchmark 训练，并手动切换线上 AI 是否启用 LLM、修改当前模型；该页面不会在其他页面出现入口
+- 容器部署时建议挂载 `./data:/app/data`，并设置 `AI_RUNTIME_CONFIG_PATH=/app/data/ai_runtime.json`，这样容器重建后参数仍会保留（删除宿主机 `data/` 或执行带卷清理的操作除外）
+
 ## 页面与轮询
 
 1. 用户名页：创建会话
@@ -54,6 +63,7 @@ go run ./cmd/server
 - 房主可在 `waiting` 状态下添加/删除多个 AI 玩家
 - AI 与真人一样走 `ApplyAction` 版本链路（`expectedVersion/stateVersion`）
 - AI 的 LLM 调用在锁外执行，锁内仅快照/校验/提交
+- 线上 LLM 决策会注入可见信息诊断（赔率、范围优势、阻断牌、showdown value 等）与本地强策略基线；模型输出仍会经过 EV/战略纠偏，减少离谱诈唬、坏跟注与漏价值
 - AI 回合自动行动；模型输出非法时使用“混合策略兜底”（牌力+压力+行动历史+对手画像），包含慢打、半诈唬与控池，不再固定单一路径
 - 真人玩家可开启/取消 `AI托管`（开启后由 AI 自动代打，手动下注类操作会被禁用，并累计 AI 复盘/对手画像）
 - 每手结束（正常结束 + leave 强制结束）会为 AI 玩家，以及本手曾由 AI 托管行动的真人玩家，写入 AI 复盘与对手画像

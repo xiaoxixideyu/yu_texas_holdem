@@ -8,6 +8,36 @@ type Service interface {
 	SummarizeHand(ctx context.Context, input SummaryInput) (Summary, error)
 }
 
+type Decision struct {
+	Action string `json:"action"`
+	Amount int    `json:"amount"`
+}
+
+type DecisionDiagnostics struct {
+	ActiveOpponents      int      `json:"activeOpponents"`
+	PotOdds              float64  `json:"potOdds"`
+	EquityEstimate       float64  `json:"equityEstimate"`
+	PressureScore        float64  `json:"pressureScore"`
+	BoardWetness         float64  `json:"boardWetness"`
+	SPR                  float64  `json:"spr"`
+	FacingBet            bool     `json:"facingBet"`
+	ShortStack           bool     `json:"shortStack"`
+	StrongDraw           bool     `json:"strongDraw"`
+	WeakDraw             bool     `json:"weakDraw"`
+	HasInitiative        bool     `json:"hasInitiative"`
+	RangeAdvantage       float64  `json:"rangeAdvantage"`
+	ScareCardScore       float64  `json:"scareCardScore"`
+	LineCapScore         float64  `json:"lineCapScore"`
+	PairStrengthScore    float64  `json:"pairStrengthScore"`
+	BlockerScore         float64  `json:"blockerScore"`
+	MissedDrawScore      float64  `json:"missedDrawScore"`
+	ShowdownValueScore   float64  `json:"showdownValueScore"`
+	StationScore         float64  `json:"stationScore"`
+	BarrelCount          int      `json:"barrelCount"`
+	PreviousBarrelCalled bool     `json:"previousBarrelCalled"`
+	VisibleTags          []string `json:"visibleTags"`
+}
+
 type PlayerSnapshot struct {
 	UserID       string `json:"userId"`
 	Username     string `json:"username"`
@@ -62,11 +92,8 @@ type DecisionInput struct {
 	MemorySummaries    []string                 `json:"memorySummaries"`
 	Profiles           map[string]Profile       `json:"profiles"`
 	OpponentStats      map[string]OpponentStats `json:"opponentStats"`
-}
-
-type Decision struct {
-	Action string `json:"action"`
-	Amount int    `json:"amount"`
+	Diagnostics        DecisionDiagnostics      `json:"diagnostics"`
+	BaselineDecision   *Decision                `json:"baselineDecision,omitempty"`
 }
 
 type Profile struct {

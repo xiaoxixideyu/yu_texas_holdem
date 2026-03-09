@@ -229,21 +229,33 @@ type aiTaskEnvelope struct {
 }
 
 type Options struct {
-	AI ai.Service
+	AI                  ai.Service
+	AIConfig            ai.Config
+	StrategyConfigPath  string
+	AIRuntimeConfigPath string
 }
 
 type MemoryStore struct {
-	mu           sync.RWMutex
-	users        map[string]*Session
-	rooms        map[string]*Room
-	lastActive   map[string]int64
-	nextRoom     int64
-	nextAIUser   int64
-	roomsVersion int64
+	mu                  sync.RWMutex
+	aiStateMu           sync.RWMutex
+	users               map[string]*Session
+	rooms               map[string]*Room
+	lastActive          map[string]int64
+	nextRoom            int64
+	nextAIUser          int64
+	roomsVersion        int64
+	strategyConfigPath  string
+	aiRuntimeConfigPath string
+	aiRuntimeUpdatedAt  int64
+	aiRuntimePersist    bool
+	aiBaseConfig        ai.Config
+	aiBaseService       ai.Service
+	aiRuntimeSettings   AIRuntimeSettings
 
 	aiService ai.Service
 	aiWorkers map[string]bool
 	aiQueue   chan aiTaskEnvelope
+	benchmark *BenchmarkManager
 }
 
 func NewMemoryStore(opts ...Options) *MemoryStore {
@@ -255,17 +267,171 @@ func NewMemoryStore(opts ...Options) *MemoryStore {
 	if aiSvc == nil {
 		aiSvc = ai.NoopService{}
 	}
-	ms := &MemoryStore{
-		users:      map[string]*Session{},
-		rooms:      map[string]*Room{},
-		lastActive: map[string]int64{},
-		aiService:  aiSvc,
-		aiWorkers:  map[string]bool{},
-		aiQueue:    make(chan aiTaskEnvelope, 256),
+	explicitConfigPath := strings.TrimSpace(cfg.StrategyConfigPath)
+	configPath := strategyConfigPath(explicitConfigPath)
+	if explicitConfigPath != "" {
+		if params, exists, err := loadStrategyParamsFromFile(configPath); err == nil {
+			setCurrentStrategyParams(params)
+			if !exists {
+				_ = saveStrategyParamsToFile(configPath, params)
+			}
+		} else {
+			_ = saveStrategyParamsToFile(configPath, currentStrategyParams())
+		}
 	}
+	runtimeDefaults := defaultAIRuntimeSettings(cfg.AIConfig, aiSvc)
+	explicitAIRuntimePath := strings.TrimSpace(cfg.AIRuntimeConfigPath)
+	runtimePath := aiRuntimeConfigPath(explicitAIRuntimePath)
+	runtimeSettings := runtimeDefaults
+	runtimeUpdatedAt := time.Now().Unix()
+	if explicitAIRuntimePath != "" {
+		if loaded, exists, err := loadAIRuntimeSettingsFromFile(runtimePath, runtimeDefaults); err == nil {
+			runtimeSettings = loaded
+			if !exists {
+				_ = saveAIRuntimeSettingsToFile(runtimePath, runtimeSettings)
+			}
+		} else {
+			_ = saveAIRuntimeSettingsToFile(runtimePath, runtimeSettings)
+		}
+	}
+	ms := &MemoryStore{
+		users:               map[string]*Session{},
+		rooms:               map[string]*Room{},
+		lastActive:          map[string]int64{},
+		aiWorkers:           map[string]bool{},
+		aiQueue:             make(chan aiTaskEnvelope, 256),
+		strategyConfigPath:  configPath,
+		aiRuntimeConfigPath: runtimePath,
+		aiRuntimeUpdatedAt:  runtimeUpdatedAt,
+		aiRuntimePersist:    explicitAIRuntimePath != "",
+		aiBaseConfig:        cfg.AIConfig,
+		aiBaseService:       aiSvc,
+		aiRuntimeSettings:   runtimeSettings,
+	}
+	ms.rebuildAIServiceLocked()
+	ms.benchmark = NewBenchmarkManager(configPath)
 	go ms.idleCleanupLoop()
 	go ms.aiEventLoop()
 	return ms
+}
+
+func (m *MemoryStore) rebuildAIServiceLocked() {
+	cfg := m.aiBaseConfig
+	if model := strings.TrimSpace(m.aiRuntimeSettings.Model); model != "" {
+		cfg.Model = model
+	}
+	if !m.aiRuntimeSettings.UseLLM {
+		m.aiService = ai.NoopService{}
+		return
+	}
+	if cfg.Enabled() {
+		m.aiService = ai.NewService(cfg)
+		return
+	}
+	if m.aiBaseService != nil && m.aiBaseService.Enabled() {
+		m.aiService = m.aiBaseService
+		return
+	}
+	m.aiService = ai.NoopService{}
+}
+
+func (m *MemoryStore) currentAIService() ai.Service {
+	if m == nil {
+		return ai.NoopService{}
+	}
+	m.aiStateMu.RLock()
+	defer m.aiStateMu.RUnlock()
+	if m.aiService == nil {
+		return ai.NoopService{}
+	}
+	return m.aiService
+}
+
+func (m *MemoryStore) currentAISettings() AIRuntimeStatus {
+	status := AIRuntimeStatus{ConfigPath: aiRuntimeConfigPath("")}
+	if m == nil {
+		status.DecisionMode = "offline"
+		return status
+	}
+	m.aiStateMu.RLock()
+	defer m.aiStateMu.RUnlock()
+	cfg := m.aiBaseConfig
+	model := strings.TrimSpace(m.aiRuntimeSettings.Model)
+	if model == "" {
+		model = strings.TrimSpace(cfg.Model)
+	}
+	usingLLM := m.aiRuntimeSettings.UseLLM && m.aiService != nil && m.aiService.Enabled()
+	status = AIRuntimeStatus{
+		ConfigPath:        m.aiRuntimeConfigPath,
+		UseLLM:            m.aiRuntimeSettings.UseLLM,
+		Model:             model,
+		DecisionMode:      "offline",
+		LLMConfigured:     usingLLM,
+		APIKeyConfigured:  strings.TrimSpace(cfg.APIKey) != "",
+		BaseURL:           strings.TrimSpace(cfg.BaseURL),
+		APIFormat:         string(cfg.APIFormat),
+		TimeoutMs:         cfg.Timeout.Milliseconds(),
+		MaxRetry:          cfg.MaxRetry,
+		LastUpdatedAtUnix: m.aiRuntimeUpdatedAt,
+	}
+	if usingLLM {
+		status.DecisionMode = "llm"
+	}
+	return status
+}
+
+func (m *MemoryStore) UpdateAIRuntimeSettings(settings AIRuntimeSettings) (AIRuntimeStatus, error) {
+	if m == nil {
+		return AIRuntimeStatus{}, fmt.Errorf("ai runtime unavailable")
+	}
+	settings.Model = strings.TrimSpace(settings.Model)
+	m.aiStateMu.Lock()
+	cfg := m.aiBaseConfig
+	if settings.UseLLM && settings.Model == "" && strings.TrimSpace(cfg.Model) == "" {
+		m.aiStateMu.Unlock()
+		return AIRuntimeStatus{}, fmt.Errorf("model required when enabling llm")
+	}
+	m.aiRuntimeSettings = AIRuntimeSettings{UseLLM: settings.UseLLM, Model: settings.Model}
+	m.aiRuntimeUpdatedAt = time.Now().Unix()
+	m.rebuildAIServiceLocked()
+	path := m.aiRuntimeConfigPath
+	persist := m.aiRuntimePersist
+	status := AIRuntimeStatus{
+		ConfigPath:        m.aiRuntimeConfigPath,
+		UseLLM:            m.aiRuntimeSettings.UseLLM,
+		Model:             strings.TrimSpace(m.aiRuntimeSettings.Model),
+		DecisionMode:      "offline",
+		LLMConfigured:     m.aiService != nil && m.aiService.Enabled(),
+		APIKeyConfigured:  strings.TrimSpace(cfg.APIKey) != "",
+		BaseURL:           strings.TrimSpace(cfg.BaseURL),
+		APIFormat:         string(cfg.APIFormat),
+		TimeoutMs:         cfg.Timeout.Milliseconds(),
+		MaxRetry:          cfg.MaxRetry,
+		LastUpdatedAtUnix: m.aiRuntimeUpdatedAt,
+	}
+	if status.Model == "" {
+		status.Model = strings.TrimSpace(cfg.Model)
+	}
+	if status.LLMConfigured {
+		status.DecisionMode = "llm"
+	}
+	m.aiStateMu.Unlock()
+	if persist {
+		if err := saveAIRuntimeSettingsToFile(path, settings); err != nil {
+			return status, err
+		}
+	}
+	return m.currentAISettings(), nil
+}
+
+func (m *MemoryStore) decisionLLMEnabled() bool {
+	service := m.currentAIService()
+	return service != nil && service.Enabled()
+}
+
+func (m *MemoryStore) summaryLLMEnabled() bool {
+	service := m.currentAIService()
+	return service != nil && service.Enabled()
 }
 
 func (m *MemoryStore) CreateSession(username string) *Session {
@@ -499,9 +665,6 @@ func (m *MemoryStore) SetPlayerAIManaged(roomID, userID string, enabled bool) (*
 	}
 	if r.Players[idx].IsAI {
 		return nil, errors.New("ai player cannot toggle ai managed")
-	}
-	if enabled && !m.aiService.Enabled() {
-		return nil, errors.New("ai service disabled")
 	}
 	if r.Players[idx].AIManaged == enabled {
 		return r, nil
@@ -1614,48 +1777,83 @@ func preflopPositionTightness(position string) float64 {
 	}
 }
 
-func preflopHandScore(input ai.DecisionInput) (float64, bool, bool, int, int) {
-	score := preflopTierScore(input.PreflopTier)
-	if len(input.HoleCards) < 2 {
+func preflopHoleStrengthCards(hole []domain.Card) (float64, bool, bool, int, int) {
+	score := preflopTierScore(preflopTierFromHoleCards(hole))
+	if len(hole) < 2 {
 		return clampFloat(score, 0.02, 0.98), false, false, 0, 10
 	}
-	r1, s1, ok1 := parseCardTextRankSuit(input.HoleCards[0])
-	r2, s2, ok2 := parseCardTextRankSuit(input.HoleCards[1])
-	if !ok1 || !ok2 {
-		return clampFloat(score, 0.02, 0.98), false, false, 0, 10
-	}
-	high := r1
-	low := r2
+	first := hole[0]
+	second := hole[1]
+	high := first.Rank
+	low := second.Rank
 	if low > high {
 		high, low = low, high
 	}
 	gap := high - low
-	isPair := r1 == r2
-	isSuited := s1 == s2
+	isPair := first.Rank == second.Rank
+	isSuited := first.Suit == second.Suit
+	broadwayCount := 0
+	if high >= 10 {
+		broadwayCount++
+	}
+	if low >= 10 {
+		broadwayCount++
+	}
 
 	if isPair {
-		score += 0.10 + clampFloat(float64(high-8), -4, 6)*0.015
-		if high >= 12 {
-			score += 0.06
+		score += 0.12 + clampFloat(float64(high-7), -5, 7)*0.018
+		switch {
+		case high >= 12:
+			score += 0.08
+		case high >= 10:
+			score += 0.04
+		case high <= 4:
+			score -= 0.02
 		}
 	} else {
-		if high >= 14 && low >= 11 {
-			score += 0.06
-		}
-		if high >= 13 && low >= 10 {
+		score += float64(broadwayCount) * 0.02
+		if high == 14 && low >= 10 {
+			score += 0.07
+		} else if high == 14 {
 			score += 0.03
 		}
 		if isSuited {
-			score += 0.03
+			score += 0.035
 		}
-		if gap <= 1 && low >= 9 {
+		switch {
+		case gap <= 1:
+			score += 0.035
+		case gap == 2:
+			score += 0.018
+		case gap >= 4:
+			score -= 0.055
+		}
+		if low <= 5 && high == 14 && isSuited {
+			score += 0.025
+		}
+		if low >= 10 && gap <= 2 {
 			score += 0.02
 		}
-		if gap >= 4 && !isSuited && high <= 11 {
-			score -= 0.05
+		if high <= 9 && gap >= 5 && !isSuited {
+			score -= 0.035
 		}
 	}
 	return clampFloat(score, 0.02, 0.98), isPair, isSuited, high, gap
+}
+
+func preflopHandScore(input ai.DecisionInput) (float64, bool, bool, int, int) {
+	if len(input.HoleCards) < 2 {
+		return clampFloat(preflopTierScore(input.PreflopTier), 0.02, 0.98), false, false, 0, 10
+	}
+	hole := make([]domain.Card, 0, 2)
+	for _, raw := range input.HoleCards[:2] {
+		card, ok := parseCardText(raw)
+		if !ok {
+			return clampFloat(preflopTierScore(input.PreflopTier), 0.02, 0.98), false, false, 0, 10
+		}
+		hole = append(hole, card)
+	}
+	return preflopHoleStrengthCards(hole)
 }
 
 func madeHandStrengthFromCategory(category int) string {
@@ -1913,6 +2111,22 @@ func maxInt(a int, b int) int {
 	return b
 }
 
+func maxFloat(a float64, b float64) float64 {
+	if a > b {
+		return a
+	}
+	return b
+}
+
+func containsAny(text string, keywords ...string) bool {
+	for _, keyword := range keywords {
+		if keyword != "" && strings.Contains(text, keyword) {
+			return true
+		}
+	}
+	return false
+}
+
 func activeOpponentCount(input ai.DecisionInput) int {
 	count := 0
 	for _, p := range input.Players {
@@ -2016,13 +2230,13 @@ func estimateFallbackEquity(input ai.DecisionInput) float64 {
 	weight := 0.72
 	switch stage {
 	case "preflop":
-		weight = 0.78
+		weight = 0.82
 	case "flop":
-		weight = 0.76
+		weight = 0.80
 	case "turn":
-		weight = 0.74
+		weight = 0.78
 	case "river":
-		weight = 0.88
+		weight = 0.90
 	}
 	blended := monteCarlo*weight + heuristic*(1.0-weight)
 	return clampFloat(blended, 0.03, 0.99)
@@ -2059,22 +2273,76 @@ func profileStrategyAdjustments(profiles map[string]ai.Profile) (float64, float6
 		if text == "" {
 			continue
 		}
-		if strings.Contains(text, "tight") || strings.Contains(text, "nit") || strings.Contains(text, "passive") {
+		if containsAny(text,
+			"tight", "nit", "passive", "tight-passive", "nitty",
+			"紧", "紧手", "被动", "保守", "谨慎", "偏紧",
+		) {
 			foldEqAdj += 0.03
 		}
-		if strings.Contains(text, "fold") || strings.Contains(text, "conservative") {
+		if containsAny(text,
+			"fold", "conservative", "overfold",
+			"弃牌", "爱弃牌", "弃得多", "过度弃牌", "保守",
+		) {
 			foldEqAdj += 0.02
 		}
-		if strings.Contains(text, "loose") || strings.Contains(text, "calling") || strings.Contains(text, "station") {
+		if containsAny(text,
+			"loose", "calling", "station", "calling-station", "loose-passive",
+			"松", "松手", "跟注站", "爱跟", "跟得多", "粘", "宽",
+		) {
 			foldEqAdj -= 0.04
 			valueAdj += 0.05
 		}
-		if strings.Contains(text, "aggressive") || strings.Contains(text, "raise") || strings.Contains(text, "bluff") {
+		if containsAny(text,
+			"aggressive", "raise", "bluff", "loose-aggressive", "tight-aggressive", "maniac",
+			"激进", "好斗", "爱加注", "加注多", "诈唬", "偷鸡", "凶",
+		) {
 			foldEqAdj -= 0.01
 			trapAdj += 0.04
 		}
+		if containsAny(text,
+			"trap", "tricky", "slowplay",
+			"慢打", "设套", "诱捕", "埋伏", "诡", "狡猾",
+		) {
+			trapAdj += 0.05
+		}
 	}
 	return clampFloat(foldEqAdj, -0.15, 0.15), clampFloat(valueAdj, -0.05, 0.18), clampFloat(trapAdj, 0, 0.22)
+}
+
+func profileRangeBias(profile ai.Profile) (float64, float64, float64, float64) {
+	text := strings.ToLower(strings.TrimSpace(profile.Style + " " + profile.Advice + " " + strings.Join(profile.Tendencies, " ")))
+	if text == "" {
+		return 0, 0, 0, 0
+	}
+	tightBias := 0.0
+	looseBias := 0.0
+	aggressionBias := 0.0
+	trapBias := 0.0
+	if containsAny(text,
+		"tight", "nit", "passive", "tight-passive", "nitty",
+		"紧", "紧手", "偏紧", "保守", "被动",
+	) {
+		tightBias += 0.22
+	}
+	if containsAny(text,
+		"loose", "calling", "station", "calling-station", "loose-passive",
+		"松", "松手", "宽", "跟注站", "爱跟", "跟得多", "粘",
+	) {
+		looseBias += 0.24
+	}
+	if containsAny(text,
+		"aggressive", "raise", "bluff", "loose-aggressive", "tight-aggressive", "maniac",
+		"激进", "好斗", "爱加注", "加注多", "诈唬", "偷鸡", "凶",
+	) {
+		aggressionBias += 0.22
+	}
+	if containsAny(text,
+		"trap", "tricky", "slowplay",
+		"慢打", "设套", "诱捕", "埋伏", "狡猾",
+	) {
+		trapBias += 0.18
+	}
+	return clampFloat(tightBias, 0, 0.32), clampFloat(looseBias, 0, 0.34), clampFloat(aggressionBias, 0, 0.30), clampFloat(trapBias, 0, 0.24)
 }
 
 func opponentStatsStrategyAdjustments(stats map[string]ai.OpponentStats) (float64, float64, float64) {
@@ -2176,6 +2444,814 @@ func parseCardTextRankSuit(card string) (int, byte, bool) {
 	return rank, suit, true
 }
 
+type visibleActionSummary struct {
+	PreflopCalls       int
+	PreflopRaises      int
+	CurrentStageCalls  int
+	CurrentStageAgg    int
+	CurrentStageChecks int
+	TotalAgg           int
+}
+
+func summarizeVisibleActionsByUser(logs []ai.ActionLog, stage string) map[string]visibleActionSummary {
+	stage = strings.ToLower(strings.TrimSpace(stage))
+	out := map[string]visibleActionSummary{}
+	for _, log := range logs {
+		if strings.TrimSpace(log.UserID) == "" {
+			continue
+		}
+		summary := out[log.UserID]
+		logStage := strings.ToLower(strings.TrimSpace(log.Stage))
+		action := strings.ToLower(strings.TrimSpace(log.Action))
+		switch action {
+		case "bet", "allin":
+			summary.TotalAgg++
+			if logStage == "preflop" {
+				summary.PreflopRaises++
+			}
+			if logStage == stage {
+				summary.CurrentStageAgg++
+			}
+		case "call":
+			if logStage == "preflop" {
+				summary.PreflopCalls++
+			}
+			if logStage == stage {
+				summary.CurrentStageCalls++
+			}
+		case "check":
+			if logStage == stage {
+				summary.CurrentStageChecks++
+			}
+		}
+		out[log.UserID] = summary
+	}
+	return out
+}
+
+func previousStageName(stage string) string {
+	switch strings.ToLower(strings.TrimSpace(stage)) {
+	case "river":
+		return "turn"
+	case "turn":
+		return "flop"
+	case "flop":
+		return "preflop"
+	default:
+		return ""
+	}
+}
+
+func postflopStagesBefore(stage string) []string {
+	switch strings.ToLower(strings.TrimSpace(stage)) {
+	case "turn":
+		return []string{"flop"}
+	case "river":
+		return []string{"flop", "turn"}
+	default:
+		return nil
+	}
+}
+
+func heroPostflopBarrelCount(input ai.DecisionInput) int {
+	count := 0
+	for _, stage := range postflopStagesBefore(input.Stage) {
+		if lastAggressorForStage(input.RecentActionLog, stage) == input.AIUserID {
+			count++
+		}
+	}
+	return count
+}
+
+func previousStreetHeroBarrelCalled(input ai.DecisionInput) bool {
+	stage := strings.ToLower(strings.TrimSpace(input.Stage))
+	previous := previousStageName(stage)
+	if previous == "" || previous == "preflop" {
+		return false
+	}
+	if lastAggressorForStage(input.RecentActionLog, previous) != input.AIUserID {
+		return false
+	}
+	summary := summarizeVisibleActionsByUser(input.RecentActionLog, previous)
+	sawCall := false
+	for _, player := range input.Players {
+		if player.UserID == input.AIUserID || player.Folded || player.AllIn {
+			continue
+		}
+		opp := summary[player.UserID]
+		if opp.CurrentStageAgg > 0 {
+			return false
+		}
+		if opp.CurrentStageCalls > 0 {
+			sawCall = true
+		}
+	}
+	return sawCall
+}
+
+func visibleRangeCapScore(input ai.DecisionInput) float64 {
+	stage := strings.ToLower(strings.TrimSpace(input.Stage))
+	if stage == "" || stage == "preflop" {
+		return 0
+	}
+	currentSummary := summarizeVisibleActionsByUser(input.RecentActionLog, stage)
+	previous := previousStageName(stage)
+	prevSummary := map[string]visibleActionSummary{}
+	heroAggressedPrev := false
+	if previous != "" {
+		prevSummary = summarizeVisibleActionsByUser(input.RecentActionLog, previous)
+		heroAggressedPrev = lastAggressorForStage(input.RecentActionLog, previous) == input.AIUserID
+	}
+	currentAggressor := lastAggressorForStage(input.RecentActionLog, stage)
+	score := 0.0
+	activeOpponents := 0
+	for _, player := range input.Players {
+		if player.UserID == input.AIUserID || player.Folded || player.AllIn {
+			continue
+		}
+		activeOpponents++
+		oppScore := 0.0
+		current := currentSummary[player.UserID]
+		if currentAggressor == "" {
+			if current.CurrentStageChecks > 0 {
+				oppScore += 0.07
+			}
+			if current.CurrentStageCalls > 0 && current.CurrentStageAgg == 0 {
+				oppScore += 0.03
+			}
+		} else if currentAggressor == input.AIUserID && current.CurrentStageCalls > 0 && current.CurrentStageAgg == 0 {
+			oppScore += 0.05
+		}
+		if heroAggressedPrev {
+			prev := prevSummary[player.UserID]
+			if prev.CurrentStageCalls > 0 && prev.CurrentStageAgg == 0 {
+				oppScore += 0.05
+			}
+		}
+		stats := input.OpponentStats[player.UserID]
+		if stats.Hands >= 3 {
+			if stats.AggressionFactor <= 1.2 {
+				oppScore += 0.02
+			}
+			if stats.VPIP >= 0.34 && stats.PFR <= 0.16 {
+				oppScore += 0.02
+			}
+		}
+		_, looseBias, aggressionBias, _ := profileRangeBias(input.Profiles[player.UserID])
+		if looseBias > 0.12 && aggressionBias < 0.10 {
+			oppScore += 0.02
+		}
+		if currentAggressor == "" && strings.EqualFold(strings.TrimSpace(player.LastAction), "check") {
+			oppScore += 0.03
+		}
+		score += oppScore
+	}
+	if activeOpponents == 0 {
+		return 0
+	}
+	if activeOpponents >= 3 {
+		score *= 0.78
+	}
+	return clampFloat(score, 0, 0.26)
+}
+
+func stageActionCount(logs []ai.ActionLog, stage string) int {
+	stage = strings.ToLower(strings.TrimSpace(stage))
+	count := 0
+	for _, log := range logs {
+		if stage == strings.ToLower(strings.TrimSpace(log.Stage)) {
+			count++
+		}
+	}
+	return count
+}
+
+func lastActorForStage(logs []ai.ActionLog, stage string) string {
+	stage = strings.ToLower(strings.TrimSpace(stage))
+	for i := len(logs) - 1; i >= 0; i-- {
+		if stage == strings.ToLower(strings.TrimSpace(logs[i].Stage)) {
+			return logs[i].UserID
+		}
+	}
+	return ""
+}
+
+func lastAggressorForStage(logs []ai.ActionLog, stage string) string {
+	stage = strings.ToLower(strings.TrimSpace(stage))
+	for i := len(logs) - 1; i >= 0; i-- {
+		if stage != strings.ToLower(strings.TrimSpace(logs[i].Stage)) {
+			continue
+		}
+		action := strings.ToLower(strings.TrimSpace(logs[i].Action))
+		if action == "bet" || action == "allin" {
+			return logs[i].UserID
+		}
+	}
+	return ""
+}
+
+func heroPostflopPositionalEdge(position string) float64 {
+	switch strings.ToLower(strings.TrimSpace(position)) {
+	case "btn", "btn_sb":
+		return 0.10
+	case "co":
+		return 0.07
+	case "hj":
+		return 0.04
+	case "mp":
+		return 0.01
+	case "utg":
+		return -0.02
+	case "sb", "bb":
+		return -0.05
+	default:
+		return 0
+	}
+}
+
+func heroHasInitiative(input ai.DecisionInput) bool {
+	stage := strings.ToLower(strings.TrimSpace(input.Stage))
+	if stage == "" {
+		stage = "preflop"
+	}
+	currentAggressor := lastAggressorForStage(input.RecentActionLog, stage)
+	if currentAggressor == input.AIUserID {
+		return true
+	}
+	if currentAggressor != "" {
+		return false
+	}
+	previous := previousStageName(stage)
+	if previous != "" {
+		previousAggressor := lastAggressorForStage(input.RecentActionLog, previous)
+		if previousAggressor == input.AIUserID {
+			return true
+		}
+		if previousAggressor != "" {
+			return false
+		}
+	}
+	return lastAggressorForStage(input.RecentActionLog, "preflop") == input.AIUserID
+}
+
+func boardRangeAdvantage(input ai.DecisionInput, board []domain.Card) float64 {
+	if len(board) == 0 {
+		return 0
+	}
+	wetness := boardWetness(input.CommunityCards)
+	ranks := topBoardRanks(board)
+	highBoard := ranks[0]
+	broadwayCount := 0
+	paired := len(ranks) < len(board)
+	for _, rank := range ranks {
+		if rank >= 11 {
+			broadwayCount++
+		}
+	}
+	heroPFA := lastAggressorForStage(input.RecentActionLog, "preflop") == input.AIUserID
+	score := 0.0
+	if heroPFA {
+		if highBoard >= 13 || broadwayCount >= 2 {
+			score += 0.11
+		}
+		if wetness <= 0.40 {
+			score += 0.09
+		}
+		if paired {
+			score += 0.04
+		}
+		if highBoard <= 10 && wetness >= 0.58 {
+			score -= 0.12
+		}
+	} else {
+		if highBoard <= 10 && wetness >= 0.58 {
+			score += 0.09
+		}
+		if highBoard >= 13 && wetness <= 0.42 {
+			score -= 0.08
+		}
+	}
+	score += heroPostflopPositionalEdge(input.PreflopPosition) * 0.35
+	if activeOpponentCount(input) >= 3 {
+		score *= 0.75
+	}
+	return clampFloat(score, -0.20, 0.22)
+}
+
+func latestBoardScareScore(board []domain.Card) float64 {
+	if len(board) < 4 {
+		return 0
+	}
+	last := board[len(board)-1]
+	prev := board[:len(board)-1]
+	score := 0.0
+	if last.Rank >= 11 {
+		score += 0.08
+		if last.Rank == 14 {
+			score += 0.03
+		}
+	}
+	prevSuitCount := map[domain.Suit]int{}
+	currentSuitCount := map[domain.Suit]int{}
+	for _, card := range prev {
+		prevSuitCount[card.Suit]++
+	}
+	for _, card := range board {
+		currentSuitCount[card.Suit]++
+	}
+	for suit, count := range currentSuitCount {
+		prevCount := prevSuitCount[suit]
+		if prevCount <= 2 && count == 3 {
+			score += 0.08
+		}
+		if prevCount <= 3 && count == 4 {
+			score += 0.10
+		}
+	}
+	for _, card := range prev {
+		gap := last.Rank - card.Rank
+		if gap < 0 {
+			gap = -gap
+		}
+		if gap <= 1 {
+			score += 0.02
+			break
+		}
+	}
+	for _, card := range prev {
+		if card.Rank == last.Rank && last.Rank >= 10 {
+			score += 0.04
+			break
+		}
+	}
+	return clampFloat(score, 0, 0.26)
+}
+
+func topBoardRanks(board []domain.Card) []int {
+	seen := map[int]bool{}
+	ranks := make([]int, 0, len(board))
+	for _, card := range board {
+		if seen[card.Rank] {
+			continue
+		}
+		seen[card.Rank] = true
+		ranks = append(ranks, card.Rank)
+	}
+	sort.Slice(ranks, func(i, j int) bool { return ranks[i] > ranks[j] })
+	return ranks
+}
+
+func pairStrengthScore(hole []domain.Card, board []domain.Card) float64 {
+	if len(hole) < 2 || len(board) == 0 {
+		return 0.10
+	}
+	boardRanks := topBoardRanks(board)
+	if len(boardRanks) == 0 {
+		return 0.10
+	}
+	highestBoard := boardRanks[0]
+	secondBoard := 0
+	if len(boardRanks) > 1 {
+		secondBoard = boardRanks[1]
+	}
+	if hole[0].Rank == hole[1].Rank {
+		rank := hole[0].Rank
+		switch {
+		case rank > highestBoard:
+			return 0.72
+		case rank >= secondBoard && secondBoard > 0:
+			return 0.48
+		default:
+			return 0.36
+		}
+	}
+	bestMatch := 0
+	for _, h := range hole {
+		for _, b := range board {
+			if h.Rank == b.Rank && h.Rank > bestMatch {
+				bestMatch = h.Rank
+			}
+		}
+	}
+	if bestMatch > 0 {
+		switch {
+		case bestMatch >= highestBoard:
+			return 0.62
+		case secondBoard > 0 && bestMatch >= secondBoard:
+			return 0.47
+		default:
+			return 0.34
+		}
+	}
+	overcards := 0
+	for _, h := range hole {
+		if h.Rank > highestBoard {
+			overcards++
+		}
+	}
+	switch {
+	case overcards >= 2:
+		return 0.20
+	case overcards == 1:
+		return 0.16
+	case hole[0].Rank == 14 || hole[1].Rank == 14:
+		return 0.14
+	default:
+		return 0.10
+	}
+}
+
+func boardMadeAndDrawStrength(hole []domain.Card, board []domain.Card) (float64, float64) {
+	madeScore := pairStrengthScore(hole, board)
+	if len(hole)+len(board) >= 5 {
+		cards := append(append([]domain.Card{}, board...), hole...)
+		best, _, _ := domain.BestOfSeven(cards)
+		switch best.Category {
+		case 8:
+			madeScore = 0.99
+		case 7:
+			madeScore = 0.97
+		case 6:
+			madeScore = 0.95
+		case 5:
+			madeScore = 0.92
+		case 4:
+			madeScore = 0.86
+		case 3:
+			madeScore = 0.76
+		case 2:
+			madeScore = 0.68
+		case 1:
+			madeScore = clampFloat(maxFloat(madeScore, 0.32), 0.32, 0.72)
+		default:
+			madeScore = clampFloat(madeScore, 0.08, 0.24)
+		}
+	}
+	drawScore := 0.0
+	flushDraw := hasFlushDraw(hole, board)
+	openEnded := hasOpenEndedStraightDraw(hole, board)
+	if flushDraw {
+		drawScore += 0.38
+	}
+	if openEnded {
+		drawScore += 0.34
+	} else if hasGutshotStraightDraw(hole, board) {
+		drawScore += 0.18
+	}
+	if flushDraw && openEnded {
+		drawScore += 0.12
+	}
+	if len(board) == 3 {
+		ranks := topBoardRanks(board)
+		if len(ranks) > 0 {
+			for _, card := range hole {
+				if card.Rank > ranks[0] {
+					drawScore += 0.05
+				}
+			}
+		}
+	}
+	return clampFloat(madeScore, 0.05, 0.99), clampFloat(drawScore, 0, 0.84)
+}
+
+func parseDecisionCards(input ai.DecisionInput) ([]domain.Card, []domain.Card, bool) {
+	hole := make([]domain.Card, 0, len(input.HoleCards))
+	board := make([]domain.Card, 0, len(input.CommunityCards))
+	used := map[domain.Card]bool{}
+	for _, raw := range input.HoleCards {
+		card, ok := parseCardText(raw)
+		if !ok || used[card] {
+			return nil, nil, false
+		}
+		used[card] = true
+		hole = append(hole, card)
+	}
+	for _, raw := range input.CommunityCards {
+		card, ok := parseCardText(raw)
+		if !ok || used[card] {
+			return nil, nil, false
+		}
+		used[card] = true
+		board = append(board, card)
+	}
+	return hole, board, len(hole) >= 2
+}
+
+func flushBlockerScore(hole []domain.Card, board []domain.Card) float64 {
+	if len(hole) < 2 || len(board) < 3 {
+		return 0
+	}
+	suitCount := map[domain.Suit]int{}
+	for _, card := range board {
+		suitCount[card.Suit]++
+	}
+	maxSuitCount := 0
+	var targetSuit domain.Suit
+	for suit, count := range suitCount {
+		if count > maxSuitCount {
+			maxSuitCount = count
+			targetSuit = suit
+		}
+	}
+	if maxSuitCount < 3 {
+		return 0
+	}
+	heroSuitCount := 0
+	score := 0.0
+	for _, card := range hole {
+		if card.Suit != targetSuit {
+			continue
+		}
+		heroSuitCount++
+		switch {
+		case card.Rank == 14:
+			score = maxFloat(score, 0.40)
+		case card.Rank == 13:
+			score = maxFloat(score, 0.31)
+		case card.Rank == 12:
+			score = maxFloat(score, 0.24)
+		case card.Rank >= 10:
+			score = maxFloat(score, 0.17)
+		default:
+			score = maxFloat(score, 0.10)
+		}
+	}
+	if heroSuitCount == 0 {
+		return 0
+	}
+	if maxSuitCount+heroSuitCount >= 5 {
+		return 0
+	}
+	if maxSuitCount >= 4 {
+		score *= 0.55
+	}
+	return clampFloat(score, 0, 0.42)
+}
+
+func broadwayBlockerScore(hole []domain.Card, board []domain.Card) float64 {
+	if len(hole) < 2 || len(board) < 5 {
+		return 0
+	}
+	highRanks := 0
+	for _, card := range board {
+		if card.Rank >= 11 {
+			highRanks++
+		}
+	}
+	if highRanks < 2 {
+		return 0
+	}
+	score := 0.0
+	for _, card := range hole {
+		switch card.Rank {
+		case 14:
+			score = maxFloat(score, 0.12)
+		case 13:
+			score = maxFloat(score, 0.08)
+		case 12:
+			score = maxFloat(score, 0.05)
+		}
+	}
+	return score
+}
+
+func riverHeroBlockerScore(hole []domain.Card, board []domain.Card, handCategoryRank int) float64 {
+	score := flushBlockerScore(hole, board)
+	if handCategoryRank <= 1 {
+		score += broadwayBlockerScore(hole, board)
+	}
+	return clampFloat(score, 0, 0.58)
+}
+
+func riverMissedDrawScore(hole []domain.Card, board []domain.Card, handCategoryRank int) float64 {
+	if len(hole) < 2 || len(board) < 5 || handCategoryRank >= 2 {
+		return 0
+	}
+	turnBoard := board[:4]
+	score := 0.0
+	turnFlushDraw := hasFlushDraw(hole, turnBoard)
+	turnOpenEnded := hasOpenEndedStraightDraw(hole, turnBoard)
+	turnGutshot := !turnOpenEnded && hasGutshotStraightDraw(hole, turnBoard)
+	if turnFlushDraw && handCategoryRank < 5 {
+		score += 0.24
+	}
+	if turnOpenEnded && handCategoryRank < 4 {
+		score += 0.20
+	} else if turnGutshot && handCategoryRank < 4 {
+		score += 0.10
+	}
+	if turnFlushDraw && turnOpenEnded && handCategoryRank < 4 {
+		score += 0.08
+	}
+	if handCategoryRank == 1 {
+		score *= 0.52
+	} else {
+		score += 0.03
+	}
+	return clampFloat(score, 0, 0.52)
+}
+
+func riverShowdownValueScore(hole []domain.Card, board []domain.Card, handCategoryRank int, pairScore float64) float64 {
+	switch {
+	case handCategoryRank >= 3:
+		return 0.96
+	case handCategoryRank == 2:
+		return 0.78
+	case handCategoryRank == 1:
+		score := 0.28 + pairScore*0.52
+		if pairScore >= 0.60 {
+			score += 0.08
+		}
+		return clampFloat(score, 0.28, 0.72)
+	default:
+		if len(hole) < 2 || len(board) == 0 {
+			return 0.08
+		}
+		ranks := topBoardRanks(board)
+		if len(ranks) == 0 {
+			return 0.08
+		}
+		highestBoard := ranks[0]
+		overcards := 0
+		aceHigh := false
+		for _, card := range hole {
+			if card.Rank > highestBoard {
+				overcards++
+			}
+			if card.Rank == 14 {
+				aceHigh = true
+			}
+		}
+		score := 0.06 + float64(overcards)*0.04
+		if aceHigh {
+			score += 0.03
+		}
+		return clampFloat(score, 0.05, 0.22)
+	}
+}
+
+func activeOpponentCallStationScore(input ai.DecisionInput) float64 {
+	total := 0.0
+	active := 0
+	for _, player := range input.Players {
+		if player.UserID == input.AIUserID || player.Folded || player.AllIn {
+			continue
+		}
+		active++
+		score := 0.0
+		profile := input.Profiles[player.UserID]
+		profileText := strings.ToLower(strings.TrimSpace(profile.Style + " " + profile.Advice + " " + strings.Join(profile.Tendencies, " ")))
+		if containsAny(profileText,
+			"calling-station", "station", "calling",
+			"跟注站", "爱跟", "爱跟到底", "跟得多", "粘",
+		) {
+			score += 0.10
+		}
+		_, looseBias, aggressionBias, _ := profileRangeBias(profile)
+		if looseBias > 0.12 {
+			score += 0.04
+		}
+		if aggressionBias < 0.10 {
+			score += 0.02
+		}
+		stats := input.OpponentStats[player.UserID]
+		if stats.Hands >= 3 {
+			if stats.FoldRate <= 0.20 {
+				score += 0.08
+			}
+			if stats.VPIP >= 0.38 && stats.PFR <= 0.16 {
+				score += 0.07
+			}
+			if stats.ShowdownRate >= 0.32 {
+				score += 0.04
+			}
+		}
+		total += score
+	}
+	if active == 0 {
+		return 0
+	}
+	return clampFloat(total/float64(active), 0, 0.28)
+}
+
+func opponentHandWeight(input ai.DecisionInput, villain ai.PlayerSnapshot, hole []domain.Card, summary visibleActionSummary, board []domain.Card) float64 {
+	score, isPair, isSuited, highRank, gap := preflopHoleStrengthCards(hole)
+	madeScore, drawScore := boardMadeAndDrawStrength(hole, board)
+	stats := input.OpponentStats[villain.UserID]
+	profile := input.Profiles[villain.UserID]
+	tightBias, looseBias, aggressionBias, trapBias := profileRangeBias(profile)
+	stage := strings.ToLower(strings.TrimSpace(input.Stage))
+	aggressiveLine := summary.CurrentStageAgg > 0 || strings.EqualFold(villain.LastAction, "bet") || strings.EqualFold(villain.LastAction, "allin")
+	callingLine := summary.CurrentStageCalls > 0 || strings.EqualFold(villain.LastAction, "call")
+	weight := 1.0
+	if tightBias > 0 {
+		weight *= 1.0 + tightBias*(score-0.46)*1.8
+	}
+	if looseBias > 0 {
+		weight *= 1.0 + looseBias*(0.57-score)*1.5
+		if isSuited && gap <= 3 && !isPair {
+			weight += 0.05 * looseBias
+		}
+	}
+
+	if stats.Hands >= 3 {
+		tightness := clampFloat((0.28-stats.VPIP)*1.4, -0.20, 0.20)
+		weight *= 1.0 + tightness*(score-0.48)*1.7
+		if stats.PFR >= 0.26 {
+			weight *= 1.0 + 0.10*(score-0.40)
+			if isPair || highRank >= 12 {
+				weight += 0.04
+			}
+		}
+		if stats.VPIP >= 0.42 {
+			weight *= 1.0 + 0.18*(0.55-score)
+			if isSuited && gap <= 3 && !isPair {
+				weight += 0.05
+			}
+		}
+	}
+
+	switch stage {
+	case "preflop":
+		if summary.PreflopRaises > 0 || strings.EqualFold(villain.LastAction, "bet") || strings.EqualFold(villain.LastAction, "allin") {
+			weight *= 0.28 + 1.75*score
+			weight *= 1.0 + aggressionBias*0.14*score
+			if isPair {
+				weight += 0.18
+			}
+			if highRank >= 13 {
+				weight += 0.10
+			}
+			if !isPair && !isSuited && highRank <= 11 && gap >= 4 {
+				weight *= 0.62
+			}
+		} else if summary.PreflopCalls > 0 || callingLine {
+			weight *= 0.52 + 1.05*score
+			weight *= 1.0 + looseBias*0.18 + trapBias*0.08*score
+			if isSuited {
+				weight += 0.08
+			}
+			if gap <= 2 {
+				weight += 0.05
+			}
+		} else if strings.EqualFold(villain.LastAction, "check") {
+			weight *= 0.74 + 0.52*score
+			if isSuited {
+				weight += 0.04
+			}
+		}
+	default:
+		wetness := boardWetness(input.CommunityCards)
+		if aggressiveLine {
+			weight *= 0.18 + 1.50*madeScore + 0.55*drawScore + 0.18*score
+			weight *= 1.0 + aggressionBias*0.16*(madeScore+drawScore*0.6)
+			if wetness > 0.55 {
+				weight *= 1.0 + 0.12*drawScore
+			} else {
+				weight *= 1.0 + 0.08*madeScore
+			}
+			if villain.AllIn {
+				weight *= 1.05 + 0.12*madeScore + 0.08*drawScore
+			}
+			if villain.RoundContrib >= input.RoundBet && input.RoundBet > 0 {
+				weight *= 1.02 + 0.12*madeScore
+			}
+		} else if callingLine {
+			weight *= 0.34 + 1.05*madeScore + 0.72*drawScore + 0.16*score
+			weight *= 1.0 + looseBias*0.16 + trapBias*0.08*madeScore
+			if isPair && highRank >= 10 {
+				weight += 0.05
+			}
+		} else if strings.EqualFold(villain.LastAction, "check") {
+			weight *= 0.70 + 0.60*madeScore + 0.40*drawScore + 0.12*(1.0-score)
+		} else {
+			weight *= 0.52 + 0.78*madeScore + 0.38*drawScore + 0.18*score
+		}
+		if stats.Hands >= 3 {
+			if stats.PFR >= 0.26 && stats.AggressionFactor >= 2.2 && aggressiveLine {
+				weight *= 1.04 + 0.10*madeScore + 0.06*drawScore
+			}
+			if stats.FoldRate <= 0.20 && callingLine {
+				weight *= 1.02 + 0.08*madeScore + 0.06*drawScore
+			}
+			if stats.ShowdownRate >= 0.34 && stats.ShowdownWinRate <= 0.47 && callingLine {
+				weight *= 1.03 + 0.05*(1.0-madeScore)
+			}
+		}
+	}
+
+	if isPair {
+		weight += 0.04
+	}
+	if isSuited && stage != "preflop" && drawScore > 0 {
+		weight += 0.04
+	}
+	if gap <= 1 && highRank >= 10 {
+		weight += 0.03
+	}
+	return clampFloat(weight, 0.07, 4.5)
+}
+
 func monteCarloTrialCount(stage string, opponents int) int {
 	stage = strings.ToLower(strings.TrimSpace(stage))
 	trials := 220
@@ -2225,13 +3301,14 @@ func estimateMonteCarloEquity(input ai.DecisionInput) (float64, bool) {
 		return 0, false
 	}
 
-	opponents := 0
+	villains := make([]ai.PlayerSnapshot, 0, len(input.Players))
 	for _, p := range input.Players {
 		if p.UserID == input.AIUserID || p.Folded {
 			continue
 		}
-		opponents++
+		villains = append(villains, p)
 	}
+	opponents := len(villains)
 	if opponents <= 0 {
 		return 1, true
 	}
@@ -2258,10 +3335,13 @@ func estimateMonteCarloEquity(input ai.DecisionInput) (float64, bool) {
 	}
 
 	trials := monteCarloTrialCount(input.Stage, opponents)
-	score := 0.0
+	unweightedScore := 0.0
+	weightedScore := 0.0
+	totalWeight := 0.0
 	work := make([]domain.Card, len(deck))
 	seed := int64(decisionHash64(input, "mc-equity"))
 	rng := mathrand.New(mathrand.NewSource(seed))
+	actionSummary := summarizeVisibleActionsByUser(input.RecentActionLog, input.Stage)
 
 	for t := 0; t < trials; t++ {
 		copy(work, deck)
@@ -2283,9 +3363,12 @@ func estimateMonteCarloEquity(input ai.DecisionInput) (float64, bool) {
 
 		heroBest := true
 		tiedOpponents := 0
+		sampleWeight := 1.0
 		for i := 0; i < opponents; i++ {
 			oppHole := []domain.Card{drawn[offset], drawn[offset+1]}
 			offset += 2
+			likelihood := opponentHandWeight(input, villains[i], oppHole, actionSummary[villains[i].UserID], board)
+			sampleWeight *= 0.45 + 0.55*likelihood
 			oppCards := append(append([]domain.Card{}, boardNow...), oppHole...)
 			oppValue, _, _ := domain.BestOfSeven(oppCards)
 			cmp := domain.CompareHandValue(oppValue, heroValue)
@@ -2297,11 +3380,17 @@ func estimateMonteCarloEquity(input ai.DecisionInput) (float64, bool) {
 				tiedOpponents++
 			}
 		}
+		totalWeight += sampleWeight
 		if heroBest {
-			score += 1.0 / float64(tiedOpponents+1)
+			share := 1.0 / float64(tiedOpponents+1)
+			unweightedScore += share
+			weightedScore += share * sampleWeight
 		}
 	}
-	return clampFloat(score/float64(trials), 0.01, 0.99), true
+	if totalWeight > 0 {
+		return clampFloat(weightedScore/totalWeight, 0.01, 0.99), true
+	}
+	return clampFloat(unweightedScore/float64(trials), 0.01, 0.99), true
 }
 
 func boardWetness(community []string) float64 {
@@ -2418,7 +3507,17 @@ func decisionHash64(input ai.DecisionInput, salt string) uint64 {
 	return h.Sum64()
 }
 
-func chooseFallbackBetAmount(input ai.DecisionInput, betMin int, mode string, roll float64, wetness float64, pressure float64) int {
+type fallbackBetSizingContext struct {
+	Initiative      bool
+	RangeAdv        float64
+	ScareScore      float64
+	BlockerScore    float64
+	MissedDrawScore float64
+	CappedScore     float64
+	BarrelCount     int
+}
+
+func chooseFallbackBetAmount(input ai.DecisionInput, betMin int, mode string, roll float64, wetness float64, pressure float64, ctx fallbackBetSizingContext, params StrategyParams) int {
 	if betMin <= 0 {
 		betMin = 1
 	}
@@ -2467,7 +3566,47 @@ func chooseFallbackBetAmount(input ai.DecisionInput, betMin int, mode string, ro
 	if stage == "river" && (mode == "value" || mode == "polarize") {
 		fraction += 0.07
 	}
-	fraction = clampFloat(fraction, 0.22, 1.25)
+	if stage == "flop" && ctx.Initiative && ctx.RangeAdv >= 0.08 && wetness <= 0.42 {
+		switch mode {
+		case "probe", "bluff":
+			fraction -= params.FlopDryRangeBetReduction
+		case "value":
+			fraction -= 0.02
+		}
+	}
+	if stage == "turn" && ctx.BarrelCount >= 1 && (ctx.ScareScore >= 0.10 || ctx.CappedScore >= 0.08) {
+		switch mode {
+		case "polarize", "bluff", "semi_bluff":
+			fraction += 0.08 + ctx.ScareScore*params.TurnScareSizingWeight + ctx.CappedScore*0.18
+		case "value":
+			fraction += 0.05 + ctx.CappedScore*0.12
+		default:
+			fraction += 0.03 + ctx.ScareScore*0.12
+		}
+	}
+	if stage == "river" {
+		barrelBonus := float64(ctx.BarrelCount) * 0.03
+		if barrelBonus > 0.10 {
+			barrelBonus = 0.10
+		}
+		switch mode {
+		case "polarize", "bluff":
+			fraction += 0.08 + ctx.BlockerScore*0.24 + ctx.MissedDrawScore*params.RiverMissedDrawSizingWeight + ctx.ScareScore*0.18 + barrelBonus
+		case "value":
+			fraction += 0.04 + ctx.CappedScore*0.12
+		case "probe":
+			if ctx.BlockerScore < 0.12 && ctx.RangeAdv < 0.08 {
+				fraction -= 0.04
+			}
+		}
+	}
+	if !ctx.Initiative && stage != "river" && mode == "probe" {
+		fraction -= 0.02
+	}
+	if ctx.CappedScore >= 0.10 && (mode == "value" || mode == "semi_bluff") {
+		fraction += 0.02
+	}
+	fraction = clampFloat(fraction, 0.18, 1.35)
 	target := input.CallAmount + int(float64(maxInt(1, input.Pot))*fraction)
 	return clampInt(target, betMin, input.Stack)
 }
@@ -2615,7 +3754,7 @@ func decisionPassesEVGuard(input ai.DecisionInput, decision ai.Decision, equity 
 
 func guardAIDecision(input ai.DecisionInput, decision ai.Decision, fallback ai.Decision) ai.Decision {
 	equity := estimateFallbackEquity(input)
-	if decisionPassesEVGuard(input, decision, equity) {
+	if decisionPassesEVGuard(input, decision, equity) && !shouldPreferFallbackDecision(input, decision, fallback, equity) {
 		return decision
 	}
 	if decisionPassesEVGuard(input, fallback, equity) {
@@ -2651,6 +3790,7 @@ func fallbackPreflopDecision(
 	foldEqAdj float64,
 	valueAdj float64,
 	potOdds float64,
+	equity float64,
 ) (ai.Decision, bool) {
 	position := strings.ToLower(strings.TrimSpace(input.PreflopPosition))
 	if position == "" {
@@ -2662,7 +3802,7 @@ func fallbackPreflopDecision(
 	}
 	handScore, isPair, isSuited, highRank, gap := preflopHandScore(input)
 	tightness := preflopPositionTightness(position)
-	handScore = clampFloat(handScore+valueAdj*0.22-pressure*0.02, 0.01, 0.99)
+	handScore = clampFloat(handScore*0.62+equity*0.38+valueAdj*0.22-pressure*0.02, 0.01, 0.99)
 	facingRaise := input.PreflopFacingRaise || (input.CallAmount > 0 && input.RoundBet > input.OpenBetMin)
 	raiseLevel := preflopRaiseLevel(input)
 
@@ -2783,6 +3923,10 @@ func fallbackPreflopDecision(
 }
 
 func fallbackDecision(input ai.DecisionInput) ai.Decision {
+	return fallbackDecisionWithParams(input, currentStrategyParams())
+}
+
+func fallbackDecisionWithParams(input ai.DecisionInput, params StrategyParams) ai.Decision {
 	allowed := map[string]bool{}
 	for _, a := range input.AllowedActions {
 		allowed[strings.ToLower(a)] = true
@@ -2828,15 +3972,118 @@ func fallbackDecision(input ai.DecisionInput) ai.Decision {
 	equityWithDraw := clampFloat(equity+drawEquityBonus(input), 0, 1)
 	spr := float64(input.Stack) / float64(maxInt(1, input.Pot))
 	shortStack := spr <= 1.35 || input.Stack <= maxInt(input.OpenBetMin*7, input.CallAmount+input.BetMin*2)
+	heroHole, heroBoard, cardsOK := parseDecisionCards(input)
+	heroCategoryRank := input.HandCategoryRank
+	pairScore := 0.0
+	blockerScore := 0.0
+	missedDrawScore := 0.0
+	showdownValueScore := 0.0
+	stationScore := activeOpponentCallStationScore(input)
+	initiative := heroHasInitiative(input)
+	rangeAdv := 0.0
+	scareScore := 0.0
+	stageActions := stageActionCount(input.RecentActionLog, stage)
+	lastStageActor := lastActorForStage(input.RecentActionLog, stage)
+	barrelCount := heroPostflopBarrelCount(input)
+	previousBarrelCalled := previousStreetHeroBarrelCalled(input)
+	lineCapScore := visibleRangeCapScore(input)
+	if cardsOK {
+		if len(heroHole)+len(heroBoard) >= 5 {
+			best, _, _ := domain.BestOfSeven(append(append([]domain.Card{}, heroBoard...), heroHole...))
+			heroCategoryRank = best.Category
+		}
+		pairScore = pairStrengthScore(heroHole, heroBoard)
+		rangeAdv = boardRangeAdvantage(input, heroBoard)
+		scareScore = latestBoardScareScore(heroBoard)
+		if stage == "river" {
+			blockerScore = riverHeroBlockerScore(heroHole, heroBoard, heroCategoryRank)
+			missedDrawScore = riverMissedDrawScore(heroHole, heroBoard, heroCategoryRank)
+			showdownValueScore = riverShowdownValueScore(heroHole, heroBoard, heroCategoryRank, pairScore)
+		}
+	}
 
 	betWithMode := func(mode string) ai.Decision {
-		amount := chooseFallbackBetAmount(input, betMin, mode, betRoll, wetness, pressure)
+		amount := chooseFallbackBetAmount(input, betMin, mode, betRoll, wetness, pressure, fallbackBetSizingContext{
+			Initiative:      initiative,
+			RangeAdv:        rangeAdv,
+			ScareScore:      scareScore,
+			BlockerScore:    blockerScore,
+			MissedDrawScore: missedDrawScore,
+			CappedScore:     lineCapScore,
+			BarrelCount:     barrelCount,
+		}, params)
 		return ai.Decision{Action: "bet", Amount: clampBet(amount)}
 	}
 
 	if stage == "preflop" && input.OpenBetMin > 0 && len(input.HoleCards) >= 2 {
-		if d, ok := fallbackPreflopDecision(input, can, canBet, betWithMode, primaryRoll, altRoll, pressure, foldEqAdj, valueAdj, potOdds); ok {
+		if d, ok := fallbackPreflopDecision(input, can, canBet, betWithMode, primaryRoll, altRoll, pressure, foldEqAdj, valueAdj, potOdds, equity); ok {
 			return d
+		}
+	}
+
+	if stage == "river" && cardsOK {
+		if facingBet && can("call") && heroCategoryRank <= 1 {
+			callEdge := pairScore*0.18 + blockerScore*0.20 + aggression*0.08 + trapAdj*0.08 - float64(opponents-1)*0.06
+			if input.CallAmount > input.Pot {
+				callEdge -= 0.06
+			} else if input.CallAmount <= maxInt(1, input.Pot/4) {
+				callEdge += 0.03
+			}
+			passivePenalty := clampFloat(0.12-aggression*0.10-trapAdj*0.08, 0, 0.10)
+			required := clampFloat(potOdds+0.05-callEdge+passivePenalty, 0.10, 0.88)
+			if equityWithDraw >= required || (pairScore >= 0.60 && blockerScore >= 0.20 && equityWithDraw+0.02 >= required) {
+				return ai.Decision{Action: "call", Amount: 0}
+			}
+			if can("fold") {
+				return ai.Decision{Action: "fold", Amount: 0}
+			}
+		}
+
+		if !facingBet && can("check") && heroCategoryRank == 1 && pairScore < params.RiverCheckbackPairMax && stationScore >= params.RiverCheckbackStationThreshold && blockerScore < 0.18 && missedDrawScore < 0.14 {
+			return ai.Decision{Action: "check", Amount: 0}
+		}
+
+		if !facingBet && canBet {
+			thinValueChance := 0.10 + valueAdj*0.95 + pairScore*0.34 - aggression*0.07 - float64(opponents-1)*0.05 + lineCapScore*0.25 - stationScore*params.RiverThinValueStationPenalty
+			if heroCategoryRank >= 2 {
+				thinValueChance += 0.14
+			}
+			if previousBarrelCalled {
+				thinValueChance += 0.04
+			}
+			thinValueChance = clampFloat(thinValueChance, 0.05, 0.78)
+			if (heroCategoryRank >= 2 || pairScore >= 0.58) && primaryRoll < thinValueChance {
+				mode := "probe"
+				if heroCategoryRank >= 2 || pairScore >= 0.66 {
+					mode = "value"
+				}
+				return betWithMode(mode)
+			}
+
+			bluffChance := 0.03 + foldEqAdj + blockerScore*0.34 + missedDrawScore*params.RiverMissedDrawBluffWeight - showdownValueScore*params.RiverShowdownPenaltyWeight - stationScore*params.RiverStationPenaltyWeight - equity*0.16 - aggression*0.08 - float64(opponents-1)*0.06 + lineCapScore*0.45 + float64(barrelCount)*0.03
+			if blockerScore >= 0.28 {
+				bluffChance += 0.06
+			}
+			if previousBarrelCalled {
+				bluffChance += scareScore * 0.22
+			}
+			if barrelCount >= 2 && (missedDrawScore >= 0.18 || blockerScore >= 0.18) {
+				bluffChance += params.RiverTripleBarrelBonus
+			}
+			if pairScore >= 0.52 {
+				bluffChance -= 0.08
+			}
+			if showdownValueScore >= 0.30 && missedDrawScore < 0.18 {
+				bluffChance -= 0.06
+			}
+			bluffChance = clampFloat(bluffChance, 0.01, 0.50)
+			if heroCategoryRank <= 1 && pairScore < 0.54 && (blockerScore >= 0.18 || missedDrawScore >= 0.18) && altRoll < bluffChance {
+				mode := "bluff"
+				if (blockerScore >= 0.34 && foldEqAdj > 0.08 && opponents <= 2) || (barrelCount >= 2 && lineCapScore >= 0.08 && scareScore >= 0.08) {
+					mode = "polarize"
+				}
+				return betWithMode(mode)
+			}
 		}
 	}
 
@@ -2896,18 +4143,47 @@ func fallbackDecision(input ai.DecisionInput) ai.Decision {
 				return ai.Decision{Action: "check", Amount: 0}
 			}
 		} else {
-			stabChance := 0.22 + valueAdj + foldEqAdj*0.40 + aggression*0.05
+			stabChance := 0.22 + valueAdj + foldEqAdj*0.40 + aggression*0.05 + lineCapScore*0.85 + float64(barrelCount)*0.04
 			if strongDraw {
 				stabChance += 0.11
+			}
+			if initiative {
+				stabChance += 0.10 + rangeAdv*0.75 + heroPostflopPositionalEdge(input.PreflopPosition)*0.30
+				if stage == "flop" && wetness <= 0.42 && opponents <= 2 {
+					stabChance += 0.08
+				}
+				if stage == "turn" {
+					stabChance += 0.06 + scareScore*0.55
+				}
+			} else {
+				stabChance += rangeAdv*0.35 - 0.04
+				if lastStageActor != "" && lastStageActor != input.AIUserID && stageActions > 0 {
+					stabChance += 0.05
+				}
+			}
+			if previousBarrelCalled {
+				if stage == "turn" {
+					stabChance += 0.08 + scareScore*0.30
+				}
+				if stage == "river" {
+					stabChance += 0.05 + blockerScore*0.16
+				}
 			}
 			if stage == "flop" {
 				stabChance += 0.05
 			}
-			stabChance = clampFloat(stabChance, 0.08, 0.82)
+			if stage == "turn" && !initiative && wetness >= 0.58 && scareScore < 0.05 {
+				stabChance -= 0.07
+			}
+			stabChance = clampFloat(stabChance, 0.08, 0.86)
 			if canBet && primaryRoll < stabChance {
 				mode := "probe"
-				if equity >= 0.72 {
+				if equity >= 0.72 || (initiative && rangeAdv >= 0.08 && stage == "flop") {
 					mode = "value"
+				} else if initiative && stage == "turn" && (scareScore >= 0.12 || (previousBarrelCalled && lineCapScore >= 0.10)) {
+					mode = "polarize"
+				} else if initiative && stage == "river" && heroCategoryRank <= 1 && barrelCount >= 2 && blockerScore >= 0.18 && lineCapScore >= 0.08 {
+					mode = "polarize"
 				} else if strongDraw {
 					mode = "semi_bluff"
 				}
@@ -2966,21 +4242,61 @@ func fallbackDecision(input ai.DecisionInput) ai.Decision {
 			return ai.Decision{Action: "call", Amount: 0}
 		}
 	} else {
-		stealChance := 0.11 + foldEqAdj + (0.12 - equity*0.08) - aggression*0.08 - float64(opponents-1)*0.03
+		stealChance := 0.11 + foldEqAdj + (0.12 - equity*0.08) - aggression*0.08 - float64(opponents-1)*0.03 + lineCapScore*0.70 + float64(barrelCount)*0.03
+		if stage == "river" {
+			stealChance += missedDrawScore*params.RiverStealMissedDrawWeight - showdownValueScore*params.RiverStealShowdownPenalty - stationScore*params.RiverStealStationPenalty
+		}
 		if strongDraw {
 			stealChance += 0.08
+		}
+		if initiative {
+			stealChance += 0.10 + rangeAdv*0.85 + heroPostflopPositionalEdge(input.PreflopPosition)*0.25
+			if stage == "flop" && wetness <= 0.42 {
+				stealChance += 0.08
+			}
+			if stage == "turn" {
+				stealChance += scareScore * 0.40
+			}
+		} else {
+			stealChance += rangeAdv*0.20 - 0.02
+		}
+		if previousBarrelCalled {
+			if stage == "turn" {
+				stealChance += 0.08 + scareScore*0.45
+			}
+			if stage == "river" {
+				stealChance += blockerScore*0.36 + scareScore*0.24
+				if barrelCount >= 2 {
+					stealChance += params.RiverTripleBarrelBonus
+				}
+			}
 		}
 		if stage == "turn" || stage == "river" {
 			stealChance += 0.04
 		}
+		if stage == "river" && pairScore >= 0.52 {
+			stealChance -= 0.08
+		}
+		if stage == "river" && (blockerScore < 0.14 || opponents >= 3) {
+			stealChance -= 0.10
+		}
+		if stage == "river" && missedDrawScore < 0.14 && blockerScore < 0.14 {
+			stealChance -= 0.10
+		}
 		if stage == "preflop" && (input.PreflopTier == "playable" || input.PreflopTier == "speculative") {
 			stealChance += 0.03
 		}
-		stealChance = clampFloat(stealChance, 0.05, 0.58)
+		stealChance = clampFloat(stealChance, 0.05, 0.82)
 		if canBet && altRoll < stealChance {
 			mode := "bluff"
 			if strongDraw {
 				mode = "semi_bluff"
+			}
+			if stage == "turn" && initiative && previousBarrelCalled && (scareScore >= 0.10 || lineCapScore >= 0.10) && !strongDraw {
+				mode = "polarize"
+			}
+			if stage == "river" && initiative && barrelCount >= 2 && (blockerScore >= 0.18 || missedDrawScore >= 0.18) && pairScore < 0.48 && opponents <= 2 {
+				mode = "polarize"
 			}
 			return betWithMode(mode)
 		}
@@ -3205,7 +4521,7 @@ func (m *MemoryStore) enqueueAIDecisionLocked(room *Room) {
 }
 
 func (m *MemoryStore) enqueueAIDecisionLockedWithRetry(room *Room, retriesLeft int) {
-	if !m.aiService.Enabled() || room == nil || room.Game == nil || room.Status != RoomPlaying {
+	if room == nil || room.Game == nil || room.Status != RoomPlaying {
 		return
 	}
 	if m.aiWorkers[room.RoomID] {
@@ -3218,58 +4534,15 @@ func (m *MemoryStore) enqueueAIDecisionLockedWithRetry(room *Room, retriesLeft i
 	if !turn.IsAI && !turn.AIManaged {
 		return
 	}
-	allowed, callAmount, minBet, minRaise := allowedActionsForPlayer(room.Game, turn)
-	if len(allowed) == 0 {
-		return
-	}
 	memory := m.ensureAIMemory(room, turn.UserID)
 	memory.LastDecisionHand = room.HandCounter
-	community := make([]string, 0, len(room.Game.CommunityCards))
-	for _, c := range room.Game.CommunityCards {
-		community = append(community, cardToText(c))
-	}
-	holeCards := make([]string, 0, len(turn.HoleCards))
-	for _, c := range turn.HoleCards {
-		holeCards = append(holeCards, cardToText(c))
-	}
-	handCategory, handCategoryRank, handRanks, preflopTier, madeHandStrength, drawFlags := buildHandStrengthFeatures(turn.HoleCards, room.Game.CommunityCards)
-	preflopPosition := preflopPositionForPlayer(room.Game, room.Game.TurnPos)
-	effectiveStackBB := effectiveStackBBForPlayer(room.Game, room.Game.TurnPos)
-	preflopFacingRaise := room.Game.Stage == domain.StagePreflop && room.Game.RoundBet > room.Game.OpenBetMin
-	input := ai.DecisionInput{
-		RoomID:             room.RoomID,
-		HandID:             room.HandCounter,
-		StateVersion:       room.StateVersion,
-		AIUserID:           turn.UserID,
-		AIUsername:         turn.Username,
-		Stage:              string(room.Game.Stage),
-		Pot:                room.Game.Pot,
-		RoundBet:           room.Game.RoundBet,
-		OpenBetMin:         room.Game.OpenBetMin,
-		BetMin:             room.Game.BetMin,
-		CallAmount:         callAmount,
-		MinBet:             minBet,
-		MinRaise:           minRaise,
-		Stack:              turn.Stack,
-		AllowedActions:     allowed,
-		CommunityCards:     community,
-		HoleCards:          holeCards,
-		HandCategory:       handCategory,
-		HandCategoryRank:   handCategoryRank,
-		HandRanks:          handRanks,
-		PreflopTier:        preflopTier,
-		PreflopPosition:    preflopPosition,
-		EffectiveStackBB:   effectiveStackBB,
-		PreflopFacingRaise: preflopFacingRaise,
-		MadeHandStrength:   madeHandStrength,
-		DrawFlags:          drawFlags,
-		Players:            copyPlayers(room, room.Game),
-		RecentActionLog:    copyActionLogs(room.Game.ActionLogs),
-		MemorySummaries:    append([]string{}, memory.HandSummaries...),
-		Profiles:           cloneProfiles(memory.OpponentProfiles),
-		OpponentStats:      cloneOpponentStats(memory.OpponentStats),
+	input, ok := buildAIDecisionInput(room, turn, memory)
+	if !ok {
+		return
 	}
 	fallback := fallbackDecision(input)
+	baseline := fallback
+	input.BaselineDecision = &baseline
 	task := &aiDecisionTask{
 		RoomID:          room.RoomID,
 		HandID:          room.HandCounter,
@@ -3285,7 +4558,7 @@ func (m *MemoryStore) enqueueAIDecisionLockedWithRetry(room *Room, retriesLeft i
 }
 
 func (m *MemoryStore) enqueueAISummaryLocked(room *Room) {
-	if !m.aiService.Enabled() || room == nil || room.Game == nil || room.Game.Stage != domain.StageFinished {
+	if !m.summaryLLMEnabled() || room == nil || room.Game == nil || room.Game.Stage != domain.StageFinished {
 		return
 	}
 	community := make([]string, 0, len(room.Game.CommunityCards))
@@ -3332,9 +4605,13 @@ func (m *MemoryStore) aiEventLoop() {
 			if task.decide == nil {
 				continue
 			}
-			decision, err := m.aiService.DecideAction(context.Background(), task.decide.Input)
-			if err != nil || !decisionAllowedByInput(task.decide.Input, decision) {
-				decision = task.decide.Fallback
+			decision := task.decide.Fallback
+			service := m.currentAIService()
+			if service != nil && service.Enabled() {
+				llmDecision, err := service.DecideAction(context.Background(), task.decide.Input)
+				if err == nil && decisionAllowedByInput(task.decide.Input, llmDecision) {
+					decision = llmDecision
+				}
 			}
 			decision = guardAIDecision(task.decide.Input, decision, task.decide.Fallback)
 			m.applyActionFromAI(task.decide, decision)
@@ -3350,7 +4627,11 @@ func (m *MemoryStore) aiEventLoop() {
 				time.Sleep(20 * time.Millisecond)
 				continue
 			}
-			summary, err := m.aiService.SummarizeHand(context.Background(), task.summary.Input)
+			service := m.currentAIService()
+			if service == nil || !service.Enabled() {
+				continue
+			}
+			summary, err := service.SummarizeHand(context.Background(), task.summary.Input)
 			if err != nil {
 				continue
 			}
@@ -3391,4 +4672,35 @@ func (m *MemoryStore) applySummary(task *aiSummaryTask, summary ai.Summary) {
 		copy(tend, profile.Tendencies)
 		mem.OpponentProfiles[uid] = &OpponentProfile{Style: profile.Style, Tendencies: tend, Advice: profile.Advice}
 	}
+}
+
+func (m *MemoryStore) BenchmarkStatus() BenchmarkStatus {
+	status := BenchmarkStatus{CurrentParams: currentStrategyParams(), PersistedParams: currentStrategyParams(), ConfigPath: strategyConfigPath(""), AISettings: AIRuntimeStatus{ConfigPath: aiRuntimeConfigPath("")}}
+	if m != nil && m.benchmark != nil {
+		status = m.benchmark.Status()
+	}
+	status.AISettings = m.currentAISettings()
+	return status
+}
+
+func (m *MemoryStore) StartBenchmark() (BenchmarkStatus, error) {
+	if m == nil || m.benchmark == nil {
+		return BenchmarkStatus{}, fmt.Errorf("benchmark unavailable")
+	}
+	status, err := m.benchmark.Start()
+	status.AISettings = m.currentAISettings()
+	return status, err
+}
+
+func (m *MemoryStore) StopBenchmark() BenchmarkStatus {
+	status := BenchmarkStatus{CurrentParams: currentStrategyParams(), PersistedParams: currentStrategyParams(), ConfigPath: strategyConfigPath(""), AISettings: AIRuntimeStatus{ConfigPath: aiRuntimeConfigPath("")}}
+	if m != nil && m.benchmark != nil {
+		status = m.benchmark.Stop()
+	}
+	status.AISettings = m.currentAISettings()
+	return status
+}
+
+func (m *MemoryStore) AIRuntimeStatus() AIRuntimeStatus {
+	return m.currentAISettings()
 }

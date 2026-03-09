@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"texas_yu/internal/ai"
+	"texas_yu/internal/domain"
 )
 
 type stubAIService struct {
@@ -588,7 +589,7 @@ func TestStore_ToggleAIManaged_BlocksManualThenAllowsAfterCancel(t *testing.T) {
 	close(releaseDecision)
 }
 
-func TestStore_ToggleAIManaged_RequiresEnabledAIService(t *testing.T) {
+func TestStore_ToggleAIManaged_AllowsOfflineLocalStrategy(t *testing.T) {
 	s := NewMemoryStore()
 	owner := s.CreateSession("owner")
 	guest := s.CreateSession("guest")
@@ -596,8 +597,12 @@ func TestStore_ToggleAIManaged_RequiresEnabledAIService(t *testing.T) {
 	if _, err := s.JoinRoom(room.RoomID, guest); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.SetPlayerAIManaged(room.RoomID, owner.UserID, true); err == nil || err.Error() != "ai service disabled" {
-		t.Fatalf("expected ai service disabled error, got %v", err)
+	managed, err := s.SetPlayerAIManaged(room.RoomID, owner.UserID, true)
+	if err != nil {
+		t.Fatalf("expected offline local strategy to be available, got %v", err)
+	}
+	if managed == nil {
+		t.Fatalf("expected room after enabling offline local strategy")
 	}
 }
 
@@ -1199,6 +1204,587 @@ func TestStore_OpponentStatsStrategyAdjustments_FromNumericStats(t *testing.T) {
 	}
 }
 
+func TestStore_ProfileStrategyAdjustments_RecognizesChineseDescriptors(t *testing.T) {
+	foldEqAdj, valueAdj, trapAdj := profileStrategyAdjustments(map[string]ai.Profile{
+		"villain-1": {
+			Style:      "跟注站",
+			Tendencies: []string{"爱跟到底"},
+			Advice:     "多做价值下注",
+		},
+		"villain-2": {
+			Style:      "紧凶",
+			Tendencies: []string{"翻牌圈爱加注", "会慢打强牌"},
+			Advice:     "别轻易偷鸡",
+		},
+		"villain-3": {
+			Style:      "保守被动",
+			Tendencies: []string{"弃牌偏多"},
+			Advice:     "可以持续施压",
+		},
+	})
+	if foldEqAdj <= 0 {
+		t.Fatalf("expected positive fold-equity adjustment from Chinese profiles, got %.4f", foldEqAdj)
+	}
+	if valueAdj <= 0 {
+		t.Fatalf("expected positive value adjustment from Chinese profiles, got %.4f", valueAdj)
+	}
+	if trapAdj <= 0 {
+		t.Fatalf("expected positive trap adjustment from Chinese profiles, got %.4f", trapAdj)
+	}
+}
+
+func TestStore_EstimateMonteCarloEquity_UsesVisibleRangeSignals(t *testing.T) {
+	base := ai.DecisionInput{
+		AIUserID:       "ai-1",
+		Stage:          "flop",
+		Pot:            95,
+		RoundBet:       60,
+		CallAmount:     60,
+		HoleCards:      []string{"AH", "QH"},
+		CommunityCards: []string{"AS", "7D", "2C"},
+		Players: []ai.PlayerSnapshot{
+			{UserID: "ai-1"},
+			{UserID: "villain", Folded: false, LastAction: "bet", RoundContrib: 60},
+		},
+		RecentActionLog: []ai.ActionLog{
+			{UserID: "villain", Action: "bet", Amount: 30, Stage: "preflop"},
+			{UserID: "ai-1", Action: "call", Amount: 30, Stage: "preflop"},
+			{UserID: "villain", Action: "bet", Amount: 60, Stage: "flop"},
+		},
+	}
+	tight := base
+	tight.OpponentStats = map[string]ai.OpponentStats{
+		"villain": {
+			Hands:            30,
+			VPIP:             0.18,
+			PFR:              0.14,
+			AggressionFactor: 2.6,
+			FoldRate:         0.24,
+			ShowdownRate:     0.31,
+			ShowdownWinRate:  0.59,
+		},
+	}
+	loose := base
+	loose.OpponentStats = map[string]ai.OpponentStats{
+		"villain": {
+			Hands:            30,
+			VPIP:             0.49,
+			PFR:              0.12,
+			AggressionFactor: 1.1,
+			FoldRate:         0.13,
+			ShowdownRate:     0.39,
+			ShowdownWinRate:  0.43,
+		},
+	}
+	eqTight, ok := estimateMonteCarloEquity(tight)
+	if !ok {
+		t.Fatalf("expected tight equity estimate to be available")
+	}
+	eqLoose, ok := estimateMonteCarloEquity(loose)
+	if !ok {
+		t.Fatalf("expected loose equity estimate to be available")
+	}
+	if eqTight >= eqLoose {
+		t.Fatalf("expected tighter aggressive line to lower hero equity, got tight=%.4f loose=%.4f", eqTight, eqLoose)
+	}
+}
+
+func TestStore_FallbackDecision_PreflopFoldsMarginalHandVsTightRaise(t *testing.T) {
+	decision := fallbackDecision(ai.DecisionInput{
+		RoomID:             "preflop-tight-open",
+		AIUserID:           "ai-1",
+		Stage:              "preflop",
+		AllowedActions:     []string{"call", "fold"},
+		RoundBet:           40,
+		OpenBetMin:         10,
+		BetMin:             10,
+		CallAmount:         40,
+		Stack:              1000,
+		Pot:                55,
+		PreflopTier:        "speculative",
+		PreflopPosition:    "co",
+		EffectiveStackBB:   100,
+		PreflopFacingRaise: true,
+		HoleCards:          []string{"KH", "TD"},
+		Players: []ai.PlayerSnapshot{
+			{UserID: "ai-1"},
+			{UserID: "villain", Folded: false, LastAction: "bet", RoundContrib: 40},
+			{UserID: "p-2", Folded: false},
+		},
+		RecentActionLog: []ai.ActionLog{
+			{UserID: "villain", Action: "bet", Amount: 40, Stage: "preflop"},
+		},
+		OpponentStats: map[string]ai.OpponentStats{
+			"villain": {
+				Hands:            42,
+				VPIP:             0.16,
+				PFR:              0.13,
+				AggressionFactor: 2.4,
+				FoldRate:         0.29,
+				ShowdownRate:     0.23,
+				ShowdownWinRate:  0.57,
+			},
+		},
+	})
+	if decision.Action != "fold" {
+		t.Fatalf("expected marginal offsuit broadway to fold vs tight raise, got %s", decision.Action)
+	}
+}
+
+func TestStore_ProfileRangeBias_AdjustsTightVsLoose(t *testing.T) {
+	tight, loose, aggressive, trap := profileRangeBias(ai.Profile{Style: "紧凶", Tendencies: []string{"爱加注", "会慢打"}, Advice: "价值下注为主"})
+	if tight <= 0 || aggressive <= 0 || trap <= 0 {
+		t.Fatalf("expected tight/aggressive/trap bias to be positive, got tight=%.4f aggressive=%.4f trap=%.4f", tight, aggressive, trap)
+	}
+	if loose != 0 {
+		t.Fatalf("expected no loose bias for tight-aggressive profile, got %.4f", loose)
+	}
+
+	tight, loose, aggressive, trap = profileRangeBias(ai.Profile{Style: "跟注站", Tendencies: []string{"爱跟到底"}, Advice: "多做价值"})
+	if loose <= 0 {
+		t.Fatalf("expected loose bias for calling-station profile, got %.4f", loose)
+	}
+	if tight != 0 || aggressive != 0 || trap != 0 {
+		t.Fatalf("expected no extra tight/aggressive/trap bias for pure station profile, got tight=%.4f aggressive=%.4f trap=%.4f", tight, aggressive, trap)
+	}
+}
+
+func TestStore_OpponentHandWeight_ProfileCanWidenSpeculativeCalls(t *testing.T) {
+	hole := []domain.Card{{Rank: 7, Suit: domain.Hearts}, {Rank: 6, Suit: domain.Hearts}}
+	villain := ai.PlayerSnapshot{UserID: "villain", LastAction: "call"}
+	summary := visibleActionSummary{PreflopCalls: 1}
+	looseInput := ai.DecisionInput{
+		Stage: "preflop",
+		Profiles: map[string]ai.Profile{
+			"villain": {Style: "跟注站", Tendencies: []string{"爱跟到底"}},
+		},
+	}
+	tightInput := ai.DecisionInput{
+		Stage: "preflop",
+		Profiles: map[string]ai.Profile{
+			"villain": {Style: "紧弱", Tendencies: []string{"保守", "弃牌偏多"}},
+		},
+	}
+	looseWeight := opponentHandWeight(looseInput, villain, hole, summary, nil)
+	tightWeight := opponentHandWeight(tightInput, villain, hole, summary, nil)
+	if looseWeight <= tightWeight {
+		t.Fatalf("expected loose profile to widen speculative suited connectors, got loose=%.4f tight=%.4f", looseWeight, tightWeight)
+	}
+}
+
+func TestStore_RiverHeroBlockerScore_PrefersNutFlushBlocker(t *testing.T) {
+	board := []domain.Card{
+		{Rank: 13, Suit: domain.Hearts},
+		{Rank: 12, Suit: domain.Hearts},
+		{Rank: 7, Suit: domain.Clubs},
+		{Rank: 2, Suit: domain.Diamonds},
+		{Rank: 4, Suit: domain.Hearts},
+	}
+	withBlocker := riverHeroBlockerScore([]domain.Card{{Rank: 14, Suit: domain.Hearts}, {Rank: 9, Suit: domain.Spades}}, board, 1)
+	withoutBlocker := riverHeroBlockerScore([]domain.Card{{Rank: 14, Suit: domain.Spades}, {Rank: 9, Suit: domain.Clubs}}, board, 1)
+	if withBlocker <= withoutBlocker {
+		t.Fatalf("expected nut flush blocker to score higher, got with=%.4f without=%.4f", withBlocker, withoutBlocker)
+	}
+}
+
+func TestStore_FallbackDecision_RiverCallsBlockerBluffCatcherVsAggressiveBet(t *testing.T) {
+	decision := fallbackDecision(ai.DecisionInput{
+		RoomID:           "river-blocker-call",
+		AIUserID:         "ai-1",
+		Stage:            "river",
+		Pot:              100,
+		RoundBet:         100,
+		CallAmount:       100,
+		Stack:            700,
+		AllowedActions:   []string{"call", "fold"},
+		HandCategory:     "one_pair",
+		HandCategoryRank: 1,
+		MadeHandStrength: "weak",
+		DrawFlags:        []string{"none"},
+		CommunityCards:   []string{"KH", "QH", "9C", "2D", "4H"},
+		Players: []ai.PlayerSnapshot{
+			{UserID: "ai-1"},
+			{UserID: "villain", Folded: false, LastAction: "bet", RoundContrib: 100},
+		},
+		RecentActionLog: []ai.ActionLog{
+			{UserID: "villain", Action: "bet", Amount: 30, Stage: "preflop"},
+			{UserID: "ai-1", Action: "call", Amount: 30, Stage: "preflop"},
+			{UserID: "villain", Action: "bet", Amount: 45, Stage: "flop"},
+			{UserID: "ai-1", Action: "call", Amount: 45, Stage: "flop"},
+			{UserID: "villain", Action: "bet", Amount: 100, Stage: "river"},
+		},
+		Profiles: map[string]ai.Profile{
+			"villain": {Style: "松凶", Tendencies: []string{"爱偷鸡", "河牌会持续开火"}, Advice: "可抓诈唬"},
+		},
+		OpponentStats: map[string]ai.OpponentStats{
+			"villain": {
+				Hands:            34,
+				VPIP:             0.44,
+				PFR:              0.29,
+				AggressionFactor: 3.1,
+				FoldRate:         0.18,
+				ShowdownRate:     0.27,
+				ShowdownWinRate:  0.44,
+			},
+		},
+		HoleCards: []string{"AH", "9D"},
+	})
+	if decision.Action != "call" {
+		t.Fatalf("expected blocker bluff-catcher to call, got %s", decision.Action)
+	}
+}
+
+func TestStore_FallbackDecision_RiverFoldsMediumPairVsPassiveOverbet(t *testing.T) {
+	decision := fallbackDecision(ai.DecisionInput{
+		RoomID:           "river-passive-overbet-fold",
+		AIUserID:         "ai-1",
+		Stage:            "river",
+		Pot:              100,
+		RoundBet:         150,
+		CallAmount:       150,
+		Stack:            700,
+		AllowedActions:   []string{"call", "fold"},
+		HandCategory:     "one_pair",
+		HandCategoryRank: 1,
+		MadeHandStrength: "weak",
+		DrawFlags:        []string{"none"},
+		CommunityCards:   []string{"KH", "QH", "9C", "2D", "4H"},
+		HoleCards:        []string{"AS", "9D"},
+		Players: []ai.PlayerSnapshot{
+			{UserID: "ai-1"},
+			{UserID: "villain", Folded: false, LastAction: "bet", RoundContrib: 150},
+		},
+		RecentActionLog: []ai.ActionLog{
+			{UserID: "villain", Action: "call", Amount: 10, Stage: "preflop"},
+			{UserID: "ai-1", Action: "check", Amount: 0, Stage: "flop"},
+			{UserID: "villain", Action: "check", Amount: 0, Stage: "flop"},
+			{UserID: "ai-1", Action: "check", Amount: 0, Stage: "turn"},
+			{UserID: "villain", Action: "bet", Amount: 150, Stage: "river"},
+		},
+		Profiles: map[string]ai.Profile{
+			"villain": {Style: "保守被动", Tendencies: []string{"弃牌偏多", "价值线偏直"}, Advice: "大注多是真值"},
+		},
+		OpponentStats: map[string]ai.OpponentStats{
+			"villain": {
+				Hands:            41,
+				VPIP:             0.18,
+				PFR:              0.10,
+				AggressionFactor: 0.8,
+				FoldRate:         0.34,
+				ShowdownRate:     0.35,
+				ShowdownWinRate:  0.58,
+			},
+		},
+	})
+	if decision.Action != "fold" {
+		t.Fatalf("expected medium pair to fold vs passive overbet, got %s", decision.Action)
+	}
+}
+
+func TestStore_HeroHasInitiative_FromPreflopAggressor(t *testing.T) {
+	if !heroHasInitiative(ai.DecisionInput{
+		AIUserID: "ai-1",
+		Stage:    "flop",
+		RecentActionLog: []ai.ActionLog{
+			{UserID: "ai-1", Action: "bet", Amount: 30, Stage: "preflop"},
+			{UserID: "p-1", Action: "call", Amount: 30, Stage: "preflop"},
+		},
+	}) {
+		t.Fatalf("expected hero to keep initiative from preflop raise")
+	}
+	if heroHasInitiative(ai.DecisionInput{
+		AIUserID: "ai-1",
+		Stage:    "flop",
+		RecentActionLog: []ai.ActionLog{
+			{UserID: "p-1", Action: "bet", Amount: 30, Stage: "preflop"},
+			{UserID: "ai-1", Action: "call", Amount: 30, Stage: "preflop"},
+		},
+	}) {
+		t.Fatalf("expected caller not to have initiative")
+	}
+}
+
+func TestStore_BoardRangeAdvantage_FavorsDryHighBoardsForAggressor(t *testing.T) {
+	dry := boardRangeAdvantage(ai.DecisionInput{
+		AIUserID:        "ai-1",
+		PreflopPosition: "btn",
+		CommunityCards:  []string{"AH", "KD", "4C"},
+		RecentActionLog: []ai.ActionLog{{UserID: "ai-1", Action: "bet", Amount: 30, Stage: "preflop"}, {UserID: "p-1", Action: "call", Amount: 30, Stage: "preflop"}},
+		Players:         []ai.PlayerSnapshot{{UserID: "ai-1"}, {UserID: "p-1"}},
+	}, []domain.Card{{Rank: 14, Suit: domain.Hearts}, {Rank: 13, Suit: domain.Diamonds}, {Rank: 4, Suit: domain.Clubs}})
+	wet := boardRangeAdvantage(ai.DecisionInput{
+		AIUserID:        "ai-1",
+		PreflopPosition: "btn",
+		CommunityCards:  []string{"9H", "8H", "7D"},
+		RecentActionLog: []ai.ActionLog{{UserID: "ai-1", Action: "bet", Amount: 30, Stage: "preflop"}, {UserID: "p-1", Action: "call", Amount: 30, Stage: "preflop"}},
+		Players:         []ai.PlayerSnapshot{{UserID: "ai-1"}, {UserID: "p-1"}},
+	}, []domain.Card{{Rank: 9, Suit: domain.Hearts}, {Rank: 8, Suit: domain.Hearts}, {Rank: 7, Suit: domain.Diamonds}})
+	if dry <= wet {
+		t.Fatalf("expected dry high board to favor aggressor more, got dry=%.4f wet=%.4f", dry, wet)
+	}
+}
+
+func TestStore_FallbackDecision_FlopCBetDryAceHighAsAggressor(t *testing.T) {
+	base := ai.DecisionInput{
+		RoomID:           "flop-cbet-dry-ace-high",
+		HandID:           88,
+		AIUserID:         "ai-1",
+		Stage:            "flop",
+		AllowedActions:   []string{"bet", "check", "fold"},
+		Pot:              75,
+		RoundBet:         0,
+		OpenBetMin:       10,
+		BetMin:           10,
+		MinBet:           10,
+		Stack:            980,
+		PreflopPosition:  "btn",
+		HoleCards:        []string{"7C", "6D"},
+		CommunityCards:   []string{"AH", "KD", "2S"},
+		HandCategory:     "high_card",
+		HandCategoryRank: 0,
+		MadeHandStrength: "none",
+		DrawFlags:        []string{"none"},
+		Players:          []ai.PlayerSnapshot{{UserID: "ai-1"}, {UserID: "p-1", Folded: false}},
+		RecentActionLog: []ai.ActionLog{
+			{UserID: "ai-1", Action: "bet", Amount: 30, Stage: "preflop"},
+			{UserID: "p-1", Action: "call", Amount: 30, Stage: "preflop"},
+		},
+		Profiles: map[string]ai.Profile{
+			"p-1": {Style: "紧弱", Tendencies: []string{"弃牌偏多"}, Advice: "可以压制"},
+		},
+		OpponentStats: map[string]ai.OpponentStats{
+			"p-1": {Hands: 24, VPIP: 0.20, PFR: 0.12, AggressionFactor: 1.0, FoldRate: 0.42, ShowdownRate: 0.22, ShowdownWinRate: 0.48},
+		},
+	}
+	bets := 0
+	for version := int64(320); version < 360; version++ {
+		input := base
+		input.StateVersion = version
+		decision := fallbackDecision(input)
+		if decision.Action == "bet" {
+			bets++
+		}
+	}
+	if bets < 18 {
+		t.Fatalf("expected meaningful c-bet frequency on dry ace-high flop, got %d bets", bets)
+	}
+}
+
+func TestStore_PostflopLinePressure_DetectsCalledThenCheckedLine(t *testing.T) {
+	input := ai.DecisionInput{
+		AIUserID: "ai-1",
+		Stage:    "turn",
+		Players: []ai.PlayerSnapshot{
+			{UserID: "ai-1"},
+			{UserID: "p-1", Folded: false, LastAction: "check"},
+		},
+		RecentActionLog: []ai.ActionLog{
+			{UserID: "ai-1", Action: "bet", Amount: 30, Stage: "preflop"},
+			{UserID: "p-1", Action: "call", Amount: 30, Stage: "preflop"},
+			{UserID: "ai-1", Action: "bet", Amount: 35, Stage: "flop"},
+			{UserID: "p-1", Action: "call", Amount: 35, Stage: "flop"},
+			{UserID: "p-1", Action: "check", Amount: 0, Stage: "turn"},
+		},
+		Profiles: map[string]ai.Profile{
+			"p-1": {Style: "跟注站", Tendencies: []string{"爱跟到底"}, Advice: "多做价值"},
+		},
+		OpponentStats: map[string]ai.OpponentStats{
+			"p-1": {Hands: 18, VPIP: 0.41, PFR: 0.11, AggressionFactor: 0.9, FoldRate: 0.18, ShowdownRate: 0.38, ShowdownWinRate: 0.44},
+		},
+	}
+	if barrels := heroPostflopBarrelCount(input); barrels != 1 {
+		t.Fatalf("expected one previous postflop barrel, got %d", barrels)
+	}
+	if !previousStreetHeroBarrelCalled(input) {
+		t.Fatalf("expected flop barrel to be recognized as called")
+	}
+	if score := visibleRangeCapScore(input); score < 0.18 {
+		t.Fatalf("expected capped-line score from call-check pattern, got %.4f", score)
+	}
+}
+
+func TestStore_ChooseFallbackBetAmount_ContextualSizing(t *testing.T) {
+	smallDryFlop := chooseFallbackBetAmount(ai.DecisionInput{Stage: "flop", Pot: 100, Stack: 1000}, 10, "probe", 0.50, 0.28, 0.35, fallbackBetSizingContext{
+		Initiative: true,
+		RangeAdv:   0.14,
+	}, defaultStrategyParams())
+	bigPolarTurn := chooseFallbackBetAmount(ai.DecisionInput{Stage: "turn", Pot: 100, Stack: 1000}, 10, "polarize", 0.50, 0.42, 0.30, fallbackBetSizingContext{
+		Initiative:  true,
+		ScareScore:  0.18,
+		CappedScore: 0.16,
+		BarrelCount: 1,
+	}, defaultStrategyParams())
+	if smallDryFlop > 40 {
+		t.Fatalf("expected dry flop range bet to stay small, got %d", smallDryFlop)
+	}
+	if bigPolarTurn < 90 {
+		t.Fatalf("expected polar turn barrel to use larger size, got %d", bigPolarTurn)
+	}
+	if bigPolarTurn <= smallDryFlop {
+		t.Fatalf("expected turn polar size to exceed dry flop size, got flop=%d turn=%d", smallDryFlop, bigPolarTurn)
+	}
+}
+
+func TestStore_FallbackDecision_TurnDoubleBarrelsScareCardAfterFlopCall(t *testing.T) {
+	base := ai.DecisionInput{
+		RoomID:           "turn-double-barrel-scare",
+		HandID:           109,
+		AIUserID:         "ai-1",
+		Stage:            "turn",
+		AllowedActions:   []string{"bet", "check", "fold"},
+		Pot:              145,
+		RoundBet:         0,
+		OpenBetMin:       10,
+		BetMin:           10,
+		MinBet:           10,
+		Stack:            935,
+		PreflopPosition:  "btn",
+		HoleCards:        []string{"QH", "JD"},
+		CommunityCards:   []string{"KH", "7D", "2C", "AS"},
+		HandCategory:     "high_card",
+		HandCategoryRank: 0,
+		MadeHandStrength: "none",
+		DrawFlags:        []string{"gutshot"},
+		Players: []ai.PlayerSnapshot{
+			{UserID: "ai-1"},
+			{UserID: "p-1", Folded: false, LastAction: "check"},
+		},
+		RecentActionLog: []ai.ActionLog{
+			{UserID: "ai-1", Action: "bet", Amount: 30, Stage: "preflop"},
+			{UserID: "p-1", Action: "call", Amount: 30, Stage: "preflop"},
+			{UserID: "ai-1", Action: "bet", Amount: 40, Stage: "flop"},
+			{UserID: "p-1", Action: "call", Amount: 40, Stage: "flop"},
+			{UserID: "p-1", Action: "check", Amount: 0, Stage: "turn"},
+		},
+		Profiles: map[string]ai.Profile{
+			"p-1": {Style: "紧弱", Tendencies: []string{"弃牌偏多", "转牌诚实"}, Advice: "二枪可以继续压制"},
+		},
+		OpponentStats: map[string]ai.OpponentStats{
+			"p-1": {Hands: 26, VPIP: 0.22, PFR: 0.13, AggressionFactor: 0.95, FoldRate: 0.41, ShowdownRate: 0.24, ShowdownWinRate: 0.47},
+		},
+	}
+	bets := 0
+	for version := int64(410); version < 450; version++ {
+		input := base
+		input.StateVersion = version
+		decision := fallbackDecision(input)
+		if decision.Action == "bet" {
+			bets++
+		}
+	}
+	if bets < 16 {
+		t.Fatalf("expected meaningful turn double-barrel frequency on scare card, got %d bets", bets)
+	}
+}
+
+func TestStore_RiverMissedDrawScore_PrefersBrickedTurnDraw(t *testing.T) {
+	board := []domain.Card{{Rank: 13, Suit: domain.Hearts}, {Rank: 7, Suit: domain.Hearts}, {Rank: 2, Suit: domain.Clubs}, {Rank: 3, Suit: domain.Diamonds}, {Rank: 9, Suit: domain.Spades}}
+	withMiss := riverMissedDrawScore([]domain.Card{{Rank: 14, Suit: domain.Hearts}, {Rank: 5, Suit: domain.Hearts}}, board, 0)
+	withoutMiss := riverMissedDrawScore([]domain.Card{{Rank: 14, Suit: domain.Spades}, {Rank: 5, Suit: domain.Diamonds}}, board, 0)
+	if withMiss <= withoutMiss {
+		t.Fatalf("expected bricked turn draw to score higher, got with=%.4f without=%.4f", withMiss, withoutMiss)
+	}
+}
+
+func TestStore_FallbackDecision_RiverTripleBarrelsMissedDrawIntoCappedRange(t *testing.T) {
+	base := ai.DecisionInput{
+		RoomID:           "river-triple-barrel-missed-draw",
+		HandID:           126,
+		AIUserID:         "ai-1",
+		Stage:            "river",
+		AllowedActions:   []string{"bet", "check", "fold"},
+		Pot:              240,
+		RoundBet:         0,
+		OpenBetMin:       10,
+		BetMin:           10,
+		MinBet:           10,
+		Stack:            760,
+		PreflopPosition:  "btn",
+		HoleCards:        []string{"AH", "5H"},
+		CommunityCards:   []string{"KH", "7H", "2C", "3D", "QS"},
+		HandCategory:     "high_card",
+		HandCategoryRank: 0,
+		MadeHandStrength: "none",
+		DrawFlags:        []string{"none"},
+		Players: []ai.PlayerSnapshot{
+			{UserID: "ai-1"},
+			{UserID: "p-1", Folded: false, LastAction: "check"},
+		},
+		RecentActionLog: []ai.ActionLog{
+			{UserID: "ai-1", Action: "bet", Amount: 30, Stage: "preflop"},
+			{UserID: "p-1", Action: "call", Amount: 30, Stage: "preflop"},
+			{UserID: "ai-1", Action: "bet", Amount: 45, Stage: "flop"},
+			{UserID: "p-1", Action: "call", Amount: 45, Stage: "flop"},
+			{UserID: "ai-1", Action: "bet", Amount: 85, Stage: "turn"},
+			{UserID: "p-1", Action: "call", Amount: 85, Stage: "turn"},
+			{UserID: "p-1", Action: "check", Amount: 0, Stage: "river"},
+		},
+		Profiles: map[string]ai.Profile{
+			"p-1": {Style: "紧弱", Tendencies: []string{"弃牌偏多", "河牌诚实"}, Advice: "三枪可继续施压"},
+		},
+		OpponentStats: map[string]ai.OpponentStats{
+			"p-1": {Hands: 33, VPIP: 0.21, PFR: 0.13, AggressionFactor: 0.9, FoldRate: 0.39, ShowdownRate: 0.23, ShowdownWinRate: 0.48},
+		},
+	}
+	bets := 0
+	for version := int64(600); version < 640; version++ {
+		input := base
+		input.StateVersion = version
+		decision := fallbackDecision(input)
+		if decision.Action == "bet" {
+			bets++
+		}
+	}
+	if bets < 16 {
+		t.Fatalf("expected meaningful triple-barrel frequency with missed draw and blocker, got %d bets", bets)
+	}
+}
+
+func TestStore_FallbackDecision_RiverChecksBackWeakPairVsCallingStation(t *testing.T) {
+	decision := fallbackDecision(ai.DecisionInput{
+		RoomID:           "river-checkback-vs-station",
+		HandID:           127,
+		AIUserID:         "ai-1",
+		Stage:            "river",
+		AllowedActions:   []string{"bet", "check", "fold"},
+		Pot:              220,
+		RoundBet:         0,
+		OpenBetMin:       10,
+		BetMin:           10,
+		MinBet:           10,
+		Stack:            780,
+		PreflopPosition:  "co",
+		HoleCards:        []string{"7C", "6D"},
+		CommunityCards:   []string{"KH", "7S", "2C", "AS", "4D"},
+		HandCategory:     "one_pair",
+		HandCategoryRank: 1,
+		MadeHandStrength: "weak",
+		DrawFlags:        []string{"none"},
+		Players: []ai.PlayerSnapshot{
+			{UserID: "ai-1"},
+			{UserID: "p-1", Folded: false, LastAction: "check"},
+		},
+		RecentActionLog: []ai.ActionLog{
+			{UserID: "ai-1", Action: "bet", Amount: 30, Stage: "preflop"},
+			{UserID: "p-1", Action: "call", Amount: 30, Stage: "preflop"},
+			{UserID: "ai-1", Action: "bet", Amount: 40, Stage: "flop"},
+			{UserID: "p-1", Action: "call", Amount: 40, Stage: "flop"},
+			{UserID: "ai-1", Action: "bet", Amount: 70, Stage: "turn"},
+			{UserID: "p-1", Action: "call", Amount: 70, Stage: "turn"},
+			{UserID: "p-1", Action: "check", Amount: 0, Stage: "river"},
+		},
+		Profiles: map[string]ai.Profile{
+			"p-1": {Style: "跟注站", Tendencies: []string{"爱跟到底", "河牌过度跟注"}, Advice: "不要乱诈唬"},
+		},
+		OpponentStats: map[string]ai.OpponentStats{
+			"p-1": {Hands: 36, VPIP: 0.46, PFR: 0.11, AggressionFactor: 0.8, FoldRate: 0.15, ShowdownRate: 0.41, ShowdownWinRate: 0.45},
+		},
+	})
+	if decision.Action != "check" {
+		t.Fatalf("expected weak pair to check back versus calling station, got %s", decision.Action)
+	}
+}
+
 func TestStore_AITurnAutoActionWithFallbackAndSummary(t *testing.T) {
 	stub := &stubAIService{}
 	stub.decisionFn = func(_ context.Context, input ai.DecisionInput) (ai.Decision, error) {
@@ -1738,4 +2324,115 @@ func containsAction(actions []string, expected string) bool {
 		}
 	}
 	return false
+}
+
+func TestStore_GuardAIDecision_PrefersFallbackOnBadRiverBluff(t *testing.T) {
+	input := ai.DecisionInput{
+		AIUserID:         "ai-1",
+		Stage:            "river",
+		Pot:              180,
+		Stack:            600,
+		RoundBet:         0,
+		MinBet:           20,
+		CallAmount:       0,
+		AllowedActions:   []string{"check", "bet", "fold"},
+		HoleCards:        []string{"7S", "6C"},
+		CommunityCards:   []string{"KD", "8C", "8S", "3H", "2D"},
+		HandCategory:     "one_pair",
+		HandCategoryRank: 1,
+		MadeHandStrength: "weak",
+		DrawFlags:        []string{"none"},
+		Players: []ai.PlayerSnapshot{
+			{UserID: "ai-1"},
+			{UserID: "p-1", Folded: false},
+		},
+	}
+	decision := guardAIDecision(input, ai.Decision{Action: "bet", Amount: 140}, ai.Decision{Action: "check", Amount: 0})
+	if decision.Action != "check" {
+		t.Fatalf("expected fallback check, got %s", decision.Action)
+	}
+}
+
+func TestStore_GuardAIDecision_PrefersFallbackOnMissedRiverValue(t *testing.T) {
+	input := ai.DecisionInput{
+		AIUserID:         "ai-1",
+		Stage:            "river",
+		Pot:              160,
+		Stack:            700,
+		RoundBet:         0,
+		MinBet:           20,
+		CallAmount:       0,
+		AllowedActions:   []string{"check", "bet", "fold"},
+		HoleCards:        []string{"AS", "AH"},
+		CommunityCards:   []string{"2C", "2D", "9H", "TS", "KD"},
+		HandCategory:     "two_pair",
+		HandCategoryRank: 2,
+		MadeHandStrength: "strong",
+		DrawFlags:        []string{"none"},
+		Players: []ai.PlayerSnapshot{
+			{UserID: "ai-1"},
+			{UserID: "p-1", Folded: false},
+		},
+	}
+	decision := guardAIDecision(input, ai.Decision{Action: "check", Amount: 0}, ai.Decision{Action: "bet", Amount: 80})
+	if decision.Action != "bet" || decision.Amount != 80 {
+		t.Fatalf("expected fallback value bet, got %#v", decision)
+	}
+}
+
+func TestStore_AITurnUsesOfflineFallbackWhenLLMDisabled(t *testing.T) {
+	stub := &stubAIService{}
+	stub.decisionFn = func(_ context.Context, input ai.DecisionInput) (ai.Decision, error) {
+		return ai.Decision{Action: "allin", Amount: 0}, nil
+	}
+
+	s := NewMemoryStore(Options{AI: stub})
+	if _, err := s.UpdateAIRuntimeSettings(AIRuntimeSettings{UseLLM: false, Model: "offline-only"}); err != nil {
+		t.Fatalf("disable llm: %v", err)
+	}
+	owner := s.CreateSession("owner")
+	guest := s.CreateSession("guest")
+	room := s.CreateRoom(owner, "room", 10, 10)
+	if _, err := s.JoinRoom(room.RoomID, guest); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.StartGame(room.RoomID, owner.UserID); err != nil {
+		t.Fatal(err)
+	}
+
+	r, ok := s.GetRoom(room.RoomID)
+	if !ok || r == nil || r.Game == nil {
+		t.Fatalf("room/game missing")
+	}
+	turn := r.Game.Players[r.Game.TurnPos]
+	managedRoom, err := s.SetPlayerAIManaged(room.RoomID, turn.UserID, true)
+	if err != nil {
+		t.Fatalf("enable offline ai managed failed: %v", err)
+	}
+	startVersion := managedRoom.StateVersion
+
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		latest, ok := s.GetRoom(room.RoomID)
+		if !ok || latest == nil || latest.Game == nil {
+			t.Fatalf("room/game missing while waiting offline ai action")
+		}
+		acted := false
+		for _, gp := range latest.Game.Players {
+			if gp.UserID == turn.UserID {
+				acted = gp.LastAction != ""
+				break
+			}
+		}
+		if latest.StateVersion > startVersion && acted {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("offline ai did not act in time: version=%d start=%d", latest.StateVersion, startVersion)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if stub.decideCount != 0 {
+		t.Fatalf("expected no llm calls when disabled, got %d", stub.decideCount)
+	}
 }
