@@ -4543,6 +4543,7 @@ func (m *MemoryStore) enqueueAIDecisionLockedWithRetry(room *Room, retriesLeft i
 	fallback := fallbackDecision(input)
 	baseline := fallback
 	input.BaselineDecision = &baseline
+	input.DecisionOptions = buildDecisionOptions(input, currentStrategyParams(), baseline)
 	task := &aiDecisionTask{
 		RoomID:          room.RoomID,
 		HandID:          room.HandCounter,
@@ -4558,9 +4559,10 @@ func (m *MemoryStore) enqueueAIDecisionLockedWithRetry(room *Room, retriesLeft i
 }
 
 func (m *MemoryStore) enqueueAISummaryLocked(room *Room) {
-	if !m.summaryLLMEnabled() || room == nil || room.Game == nil || room.Game.Stage != domain.StageFinished {
+	if room == nil || room.Game == nil || room.Game.Stage != domain.StageFinished {
 		return
 	}
+	canSummarize := m.summaryLLMEnabled()
 	community := make([]string, 0, len(room.Game.CommunityCards))
 	for _, c := range room.Game.CommunityCards {
 		community = append(community, cardToText(c))
@@ -4578,6 +4580,9 @@ func (m *MemoryStore) enqueueAISummaryLocked(room *Room) {
 		m.updateOpponentStatsFromFinishedHandLocked(room, gp.UserID)
 		mem := m.ensureAIMemory(room, gp.UserID)
 		if mem.LastSummarizedHand == room.HandCounter {
+			continue
+		}
+		if !canSummarize {
 			continue
 		}
 		input := ai.SummaryInput{
@@ -4609,8 +4614,11 @@ func (m *MemoryStore) aiEventLoop() {
 			service := m.currentAIService()
 			if service != nil && service.Enabled() {
 				llmDecision, err := service.DecideAction(context.Background(), task.decide.Input)
-				if err == nil && decisionAllowedByInput(task.decide.Input, llmDecision) {
-					decision = llmDecision
+				if err == nil {
+					llmDecision = materializeDecisionOption(task.decide.Input, llmDecision)
+					if decisionAllowedByInput(task.decide.Input, llmDecision) {
+						decision = llmDecision
+					}
 				}
 			}
 			decision = guardAIDecision(task.decide.Input, decision, task.decide.Fallback)

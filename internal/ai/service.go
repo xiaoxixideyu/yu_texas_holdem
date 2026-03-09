@@ -102,6 +102,7 @@ func decodeDecision(raw string) (Decision, error) {
 	if err := json.Unmarshal([]byte(raw), &out); err != nil {
 		return Decision{}, err
 	}
+	out.OptionID = strings.TrimSpace(strings.ToLower(out.OptionID))
 	out.Action = strings.TrimSpace(strings.ToLower(out.Action))
 	if out.Amount < 0 {
 		out.Amount = 0

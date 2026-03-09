@@ -256,7 +256,9 @@ func benchmarkSelfPlayHand(candidate StrategyParams, incumbent StrategyParams, h
 		if turn.UserID == "candidate" {
 			params = candidate
 		}
-		decision := fallbackDecisionWithParams(input, params)
+		baseline := fallbackDecisionWithParams(input, params)
+		options := buildDecisionOptions(input, params, baseline)
+		decision := chooseBestDecisionOption(input, baseline, options)
 		decision = benchmarkSafeDecision(input, decision)
 		if err := room.Game.ApplyAction(turn.UserID, decision.Action, decision.Amount); err != nil {
 			fallback := benchmarkLegalDecision(input)

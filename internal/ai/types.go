@@ -9,8 +9,34 @@ type Service interface {
 }
 
 type Decision struct {
-	Action string `json:"action"`
-	Amount int    `json:"amount"`
+	OptionID string `json:"optionId,omitempty"`
+	Action   string `json:"action"`
+	Amount   int    `json:"amount"`
+}
+
+type DecisionOption struct {
+	ID         string   `json:"id"`
+	Action     string   `json:"action"`
+	Amount     int      `json:"amount"`
+	Mode       string   `json:"mode,omitempty"`
+	EVEstimate float64  `json:"evEstimate"`
+	LocalScore float64  `json:"localScore"`
+	RiskScore  float64  `json:"riskScore"`
+	IsBaseline bool     `json:"isBaseline,omitempty"`
+	Notes      []string `json:"notes,omitempty"`
+}
+
+type OpponentRangeHint struct {
+	UserID          string   `json:"userId"`
+	Username        string   `json:"username"`
+	PreflopBucket   string   `json:"preflopBucket"`
+	CurrentLine     string   `json:"currentLine"`
+	LikelyHandClass string   `json:"likelyHandClass"`
+	FoldToPressure  float64  `json:"foldToPressure"`
+	TrapRisk        float64  `json:"trapRisk"`
+	DrawWeight      float64  `json:"drawWeight"`
+	Confidence      float64  `json:"confidence"`
+	Notes           []string `json:"notes,omitempty"`
 }
 
 type DecisionDiagnostics struct {
@@ -92,7 +118,9 @@ type DecisionInput struct {
 	MemorySummaries    []string                 `json:"memorySummaries"`
 	Profiles           map[string]Profile       `json:"profiles"`
 	OpponentStats      map[string]OpponentStats `json:"opponentStats"`
+	OpponentRanges     []OpponentRangeHint      `json:"opponentRanges,omitempty"`
 	Diagnostics        DecisionDiagnostics      `json:"diagnostics"`
+	DecisionOptions    []DecisionOption         `json:"decisionOptions,omitempty"`
 	BaselineDecision   *Decision                `json:"baselineDecision,omitempty"`
 }
 

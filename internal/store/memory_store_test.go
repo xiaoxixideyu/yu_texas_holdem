@@ -2436,3 +2436,174 @@ func TestStore_AITurnUsesOfflineFallbackWhenLLMDisabled(t *testing.T) {
 		t.Fatalf("expected no llm calls when disabled, got %d", stub.decideCount)
 	}
 }
+
+func TestStore_BuildDecisionOptions_IncludeBaselineAndStrongAlternatives(t *testing.T) {
+	input := ai.DecisionInput{
+		RoomID:           "opts-1",
+		AIUserID:         "ai-1",
+		Stage:            "river",
+		AllowedActions:   []string{"check", "bet", "fold"},
+		MinBet:           20,
+		Stack:            700,
+		Pot:              160,
+		HoleCards:        []string{"AS", "AH"},
+		CommunityCards:   []string{"2C", "2D", "9H", "TS", "KD"},
+		HandCategory:     "two_pair",
+		HandCategoryRank: 2,
+		MadeHandStrength: "strong",
+		DrawFlags:        []string{"none"},
+		Players: []ai.PlayerSnapshot{
+			{UserID: "ai-1"},
+			{UserID: "p-1", Folded: false},
+		},
+	}
+	baseline := ai.Decision{Action: "bet", Amount: 80}
+	options := buildDecisionOptions(input, currentStrategyParams(), baseline)
+	if len(options) < 2 {
+		t.Fatalf("expected multiple decision options, got %d", len(options))
+	}
+	foundBaseline := false
+	foundBet := false
+	for idx, option := range options {
+		if idx > 0 && options[idx-1].EVEstimate < option.EVEstimate {
+			t.Fatalf("expected options sorted by ev desc, got %v before %v", options[idx-1], option)
+		}
+		if option.IsBaseline && option.Action == "bet" && option.Amount == 80 {
+			foundBaseline = true
+		}
+		if option.Action == "bet" {
+			foundBet = true
+			if option.EVEstimate == 0 {
+				t.Fatalf("expected bet option to include ev estimate, got %#v", option)
+			}
+		}
+	}
+	if !foundBaseline {
+		t.Fatalf("expected baseline option in candidates, got %#v", options)
+	}
+	if !foundBet {
+		t.Fatalf("expected at least one bet option, got %#v", options)
+	}
+}
+
+func TestStore_BuildAIDecisionInput_IncludesOpponentRangeHints(t *testing.T) {
+	room := &Room{
+		RoomID:       "range-input",
+		Status:       RoomPlaying,
+		StateVersion: 9,
+		HandCounter:  3,
+		Game: &domain.GameState{
+			Stage:      domain.StageTurn,
+			Pot:        140,
+			RoundBet:   40,
+			OpenBetMin: 10,
+			BetMin:     10,
+			TurnPos:    0,
+			CommunityCards: []domain.Card{
+				{Rank: 14, Suit: domain.Hearts},
+				{Rank: 11, Suit: domain.Hearts},
+				{Rank: 7, Suit: domain.Clubs},
+				{Rank: 2, Suit: domain.Spades},
+			},
+			Players: []*domain.GamePlayer{
+				{UserID: "ai-1", Username: "AI", IsAI: true, SeatIndex: 0, Stack: 860, RoundContrib: 40, HoleCards: []domain.Card{{Rank: 14, Suit: domain.Spades}, {Rank: 13, Suit: domain.Spades}}},
+				{UserID: "p-1", Username: "Villain", SeatIndex: 1, Stack: 900, RoundContrib: 40, LastAction: "call"},
+			},
+			ActionLogs: []domain.ActionLog{
+				{UserID: "p-1", Username: "Villain", Action: "call", Amount: 10, Stage: "preflop"},
+				{UserID: "ai-1", Username: "AI", Action: "bet", Amount: 30, Stage: "turn"},
+				{UserID: "p-1", Username: "Villain", Action: "call", Amount: 30, Stage: "turn"},
+			},
+		},
+		AIMemory: map[string]*RoomAIMemory{
+			"ai-1": {
+				HandSummaries:    []string{"villain likes bluff-catching"},
+				OpponentProfiles: map[string]*OpponentProfile{"p-1": {Style: "calling-station", Tendencies: []string{"爱跟到底"}, Advice: "thin value more"}},
+				OpponentStats:    map[string]*OpponentStat{"p-1": {Hands: 8, VPIPHands: 5, PFRHands: 1, PostflopCallActions: 5, FoldActions: 1, DecisionActions: 10}},
+			},
+		},
+	}
+	turn := room.Game.Players[0]
+	memory := room.AIMemory["ai-1"]
+	input, ok := buildAIDecisionInput(room, turn, memory)
+	if !ok {
+		t.Fatalf("expected decision input")
+	}
+	if len(input.OpponentRanges) != 1 {
+		t.Fatalf("expected one opponent range hint, got %#v", input.OpponentRanges)
+	}
+	hint := input.OpponentRanges[0]
+	if hint.UserID != "p-1" {
+		t.Fatalf("unexpected hint user: %#v", hint)
+	}
+	if hint.PreflopBucket == "" || hint.CurrentLine == "" || hint.LikelyHandClass == "" {
+		t.Fatalf("expected populated range hint, got %#v", hint)
+	}
+	if hint.Confidence <= 0 || hint.FoldToPressure <= 0 {
+		t.Fatalf("expected numeric range fields, got %#v", hint)
+	}
+}
+
+func TestStore_MaterializeDecisionOption_UsesOptionIDAndSnapsBetSize(t *testing.T) {
+	input := ai.DecisionInput{
+		DecisionOptions: []ai.DecisionOption{
+			{ID: "check", Action: "check", Amount: 0},
+			{ID: "probe", Action: "bet", Amount: 60},
+			{ID: "polarize", Action: "bet", Amount: 140},
+		},
+	}
+	picked := materializeDecisionOption(input, ai.Decision{OptionID: "polarize", Action: "bet", Amount: 90})
+	if picked.OptionID != "polarize" || picked.Action != "bet" || picked.Amount != 140 {
+		t.Fatalf("expected exact candidate by option id, got %#v", picked)
+	}
+	nearest := materializeDecisionOption(input, ai.Decision{Action: "bet", Amount: 130})
+	if nearest.OptionID != "polarize" || nearest.Amount != 140 {
+		t.Fatalf("expected nearest bet candidate, got %#v", nearest)
+	}
+}
+
+func TestStore_EnqueueAISummaryLocked_UpdatesOpponentStatsWithoutLLM(t *testing.T) {
+	s := NewMemoryStore()
+	room := &Room{
+		RoomID:      "summary-offline",
+		Status:      RoomPlaying,
+		HandCounter: 12,
+		Game: &domain.GameState{
+			Stage:      domain.StageFinished,
+			OpenBetMin: 10,
+			BetMin:     10,
+			Players: []*domain.GamePlayer{
+				{UserID: "ai-1", Username: "AI", IsAI: true, SeatIndex: 0, Stack: 1020, Won: 20},
+				{UserID: "p-1", Username: "Villain", SeatIndex: 1, Stack: 980, LastAction: "call"},
+			},
+			Result: &domain.GameResult{Winners: []string{"ai-1"}, Reason: "showdown"},
+			ActionLogs: []domain.ActionLog{
+				{UserID: "ai-1", Username: "AI", Action: "bet", Amount: 20, Stage: "preflop"},
+				{UserID: "p-1", Username: "Villain", Action: "call", Amount: 20, Stage: "preflop"},
+				{UserID: "ai-1", Username: "AI", Action: "bet", Amount: 30, Stage: "flop"},
+				{UserID: "p-1", Username: "Villain", Action: "call", Amount: 30, Stage: "flop"},
+			},
+		},
+		AIMemory: map[string]*RoomAIMemory{
+			"ai-1": {HandSummaries: []string{}, OpponentProfiles: map[string]*OpponentProfile{}, OpponentStats: map[string]*OpponentStat{}},
+		},
+	}
+	s.enqueueAISummaryLocked(room)
+	mem := room.AIMemory["ai-1"]
+	if mem == nil {
+		t.Fatalf("expected ai memory")
+	}
+	stat := mem.OpponentStats["p-1"]
+	if stat == nil {
+		t.Fatalf("expected opponent stats updated without llm")
+	}
+	if stat.Hands != 1 {
+		t.Fatalf("expected hands=1, got %#v", stat)
+	}
+	if stat.VPIPHands != 1 || stat.PostflopCallActions != 1 {
+		t.Fatalf("expected vpip/call stats updated, got %#v", stat)
+	}
+	if mem.LastSummarizedHand != 0 {
+		t.Fatalf("expected no llm summary when disabled, got lastSummarizedHand=%d", mem.LastSummarizedHand)
+	}
+}

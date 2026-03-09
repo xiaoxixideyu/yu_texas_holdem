@@ -73,6 +73,7 @@ func buildAIDecisionInput(room *Room, turn *domain.GamePlayer, memory *RoomAIMem
 		OpponentStats:      cloneOpponentStats(memory.OpponentStats),
 	}
 	input.Diagnostics = buildDecisionDiagnostics(input)
+	input.OpponentRanges = buildOpponentRangeHints(input)
 	return input, true
 }
 
