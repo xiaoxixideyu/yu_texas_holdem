@@ -33,34 +33,105 @@ func (c *openAIClient) runJSON(ctx context.Context, systemPrompt, userPrompt str
 }
 
 func (c *openAIClient) runChatCompletions(ctx context.Context, systemPrompt, userPrompt string) (string, error) {
-	resp, err := c.client.Chat.Completions.New(ctx, openai.ChatCompletionNewParams{
+	stream := c.client.Chat.Completions.NewStreaming(ctx, openai.ChatCompletionNewParams{
 		Model: openai.ChatModel(c.cfg.Model),
 		Messages: []openai.ChatCompletionMessageParamUnion{
 			openai.SystemMessage(systemPrompt),
 			openai.UserMessage(userPrompt),
 		},
 	})
-	if err != nil {
+	if stream == nil {
+		return "", fmt.Errorf("chat completion stream unavailable")
+	}
+	defer stream.Close()
+
+	var out strings.Builder
+	var refusal strings.Builder
+	for stream.Next() {
+		chunk := stream.Current()
+		for _, choice := range chunk.Choices {
+			if choice.Index != 0 {
+				continue
+			}
+			if choice.Delta.Content != "" {
+				out.WriteString(choice.Delta.Content)
+			}
+			if choice.Delta.Refusal != "" {
+				refusal.WriteString(choice.Delta.Refusal)
+			}
+		}
+	}
+	if err := stream.Err(); err != nil {
 		return "", err
 	}
-	if len(resp.Choices) == 0 {
+	if out.Len() == 0 {
+		if refusal.Len() > 0 {
+			return "", fmt.Errorf("chat completion refused: %s", strings.TrimSpace(refusal.String()))
+		}
 		return "", fmt.Errorf("empty chat choices")
 	}
-	return extractJSONObject(resp.Choices[0].Message.Content), nil
+	return extractJSONObject(out.String()), nil
 }
 
 func (c *openAIClient) runResponses(ctx context.Context, systemPrompt, userPrompt string) (string, error) {
-	resp, err := c.client.Responses.New(ctx, responses.ResponseNewParams{
+	stream := c.client.Responses.NewStreaming(ctx, responses.ResponseNewParams{
 		Model:        openai.ChatModel(c.cfg.Model),
 		Instructions: openai.String(systemPrompt),
 		Input: responses.ResponseNewParamsInputUnion{
 			OfString: openai.String(userPrompt),
 		},
 	})
-	if err != nil {
+	if stream == nil {
+		return "", fmt.Errorf("response stream unavailable")
+	}
+	defer stream.Close()
+
+	var out strings.Builder
+	var refusal strings.Builder
+	sawDeltaByPart := map[string]bool{}
+	for stream.Next() {
+		event := stream.Current()
+		switch event.Type {
+		case "response.output_text.delta":
+			delta := event.AsResponseOutputTextDelta()
+			if delta.Delta != "" {
+				out.WriteString(delta.Delta)
+				key := fmt.Sprintf("%d:%d", delta.OutputIndex, delta.ContentIndex)
+				sawDeltaByPart[key] = true
+			}
+		case "response.output_text.done":
+			done := event.AsResponseOutputTextDone()
+			if done.Text == "" {
+				break
+			}
+			key := fmt.Sprintf("%d:%d", done.OutputIndex, done.ContentIndex)
+			if !sawDeltaByPart[key] {
+				out.WriteString(done.Text)
+			}
+		case "response.refusal.delta":
+			delta := event.AsResponseRefusalDelta()
+			if delta.Delta != "" {
+				refusal.WriteString(delta.Delta)
+			}
+		case "response.refusal.done":
+			if refusal.Len() == 0 {
+				done := event.AsResponseRefusalDone()
+				if done.Refusal != "" {
+					refusal.WriteString(done.Refusal)
+				}
+			}
+		}
+	}
+	if err := stream.Err(); err != nil {
 		return "", err
 	}
-	return extractJSONObject(resp.OutputText()), nil
+	if out.Len() == 0 {
+		if refusal.Len() > 0 {
+			return "", fmt.Errorf("response refused: %s", strings.TrimSpace(refusal.String()))
+		}
+		return "", fmt.Errorf("empty response output")
+	}
+	return extractJSONObject(out.String()), nil
 }
 
 func withTimeout(parent context.Context, d time.Duration) (context.Context, context.CancelFunc) {
